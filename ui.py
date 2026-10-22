@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
@@ -1421,8 +1422,15 @@ class App(tk.Tk):
             label(cell, title, "caption", SUBTLE).pack(anchor="w")
             self.eng_stats[key] = label(cell, "—", "h3")
             self.eng_stats[key].pack(anchor="w")
-        label(db_card, "Sources: MalwareBazaar and URLhaus (abuse.ch), OpenPhish. Free community feeds, "
-                       "refreshed every 6 hours.", "small", SUBTLE).pack(anchor="w", pady=(px(14), 0))
+        label(db_card, "Sources: MalwareBazaar and URLhaus (abuse.ch), OpenPhish, stalkerware indicators. Free "
+                       "community feeds, refreshed every 6 hours.", "small", SUBTLE).pack(anchor="w", pady=(px(14), 0))
+        right = setting_row(db_card, "abuse.ch key", "Free, needed for MalwareBazaar and URLhaus. Get one at "
+                                                     "auth.abuse.ch; stored encrypted with Windows")
+        self.abusech_key = tk.StringVar()
+        ttk.Entry(right, textvariable=self.abusech_key, show="•", width=26, font=F["body"]).pack(side="left")
+        Button(right, "Save key", self.abusech_save_key, "primary", icon="check").pack(side="left", padx=(px(8), 0))
+        Button(right, "Get key", lambda: webbrowser.open(engine.ABUSECH_SIGNUP), "ghost").pack(side="left",
+                                                                                              padx=(px(6), 0))
         ecfg = self.settings["engine"]
         self.eng_vars = {k: tk.BooleanVar(value=ecfg[k]) for k in ("realtime", "auto_update", "auto_quarantine",
                                                                     "download_protection", "hold_downloads")}
@@ -1669,7 +1677,11 @@ class App(tk.Tk):
                     self.eng_db_status.configure(text=f"Last updated {ago(st['updated'])}", fg=MUTED)
                 else:
                     self.eng_db_status.configure(text="Never updated — click Update now to download the "
-                                                      "signatures (about 45 MB, once).", fg=WARN)
+                                                      "signatures.", fg=WARN)
+                if not engine.abusech_key():
+                    self.eng_db_status.configure(text=self.eng_db_status.cget("text") + "  ·  MalwareBazaar and "
+                                                 "URLhaus are paused until you add your free abuse.ch key below.",
+                                                 fg=WARN)
                 on = self.settings["engine"]["realtime"]
                 text, tone = ("ON", "ok") if on and running else ("STARTING", "info") if on else ("OFF", "warn")
                 fg, bgc = TONES[tone]
@@ -1692,6 +1704,16 @@ class App(tk.Tk):
                     messagebox.showwarning("PC Guard", "Could not reach the threat feeds:\n\n" + "\n".join(errors))
             self.ui(done)
         self.bg(work)
+
+    def abusech_save_key(self):
+        key = self.abusech_key.get().strip()
+        if not key:
+            return
+        engine.save_abusech_key(key)
+        self.settings = load_settings()
+        self.abusech_key.set("")
+        messagebox.showinfo("PC Guard", "abuse.ch key saved. PC Guard will now download the latest signatures.")
+        self.engine_update()
 
     def _save_engine_settings(self):
         for k, v in self.eng_vars.items():

@@ -11,6 +11,7 @@ All threat intelligence comes from free, keyless feeds.
 """
 import hashlib
 import io
+import csv
 import ipaddress
 import json
 import math
@@ -20,14 +21,15 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
 from collections import Counter
 from urllib.parse import urlsplit
 
-from core import DATA_DIR, LOCAL, NO_WINDOW, PROGDATA, SCRIPT, WINDIR, fixed_drives, is_admin, load_settings, notify, \
-    ps_quote, pythonw, run_ps
+from core import DATA_DIR, LOCAL, NO_WINDOW, PROGDATA, SCRIPT, SETTINGS_FILE, WINDIR, decrypt_secret, \
+    encrypt_secret, fixed_drives, is_admin, load_settings, notify, ps_quote, pythonw, run_ps, write_json
 
 ENGINE_DIR = os.path.join(DATA_DIR, "engine")
 DB_FILE = os.path.join(ENGINE_DIR, "engine.db")
@@ -47,11 +49,11 @@ COMMON_STARTUP = os.path.join(PROGDATA, r"Microsoft\Windows\Start Menu\Programs\
 PUBLIC = os.environ.get("PUBLIC", r"C:\Users\Public")
 
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
-HASH_FULL = "https://bazaar.abuse.ch/export/txt/sha256/full/"
-FEEDS = [  # (name, kind, url)
-    ("MalwareBazaar", "hash", "https://bazaar.abuse.ch/export/txt/sha256/recent/"),
-    ("URLhaus", "url", "https://urlhaus.abuse.ch/downloads/text_online/"),
-    ("URLhaus hosts", "host", "https://urlhaus.abuse.ch/downloads/hostfile/"),
+# abuse.ch retired its open downloads (HTTP 410) in Oct 2026: exports now need a free Auth-Key in the path
+ABUSECH_SIGNUP = "https://auth.abuse.ch/"
+FEEDS = [  # (name, kind, url) - {key} is the abuse.ch Auth-Key
+    ("MalwareBazaar", "hash", "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv"),
+    ("URLhaus", "urlhaus", "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv"),
     ("OpenPhish", "url", "https://openphish.com/feed.txt"),
     ("Stalkerware apps", "stalker_pkgs",
      "https://raw.githubusercontent.com/AssoEchap/stalkerware-indicators/master/ioc.yaml"),
@@ -214,6 +216,24 @@ def _lines(data):
             yield line
 
 
+def abusech_key():
+    return decrypt_secret(load_settings()["engine"]["abusech_key"])
+
+
+def save_abusech_key(key):
+    settings = load_settings()
+    settings["engine"]["abusech_key"] = encrypt_secret(key.strip())
+    write_json(SETTINGS_FILE, settings)
+    log_event("engine", "info", "abuse.ch key " + ("saved" if key else "removed"))
+
+
+def _csv_rows(data):
+    if data[:2] == b"PK":  # exports may come zipped
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            data = z.read(z.namelist()[0])
+    return csv.reader(_lines(data), skipinitialspace=True)
+
+
 def needs_update(max_age=UPDATE_EVERY):
     with db() as con:
         return time.time() - meta_get(con, "last_update", 0) > max_age
@@ -221,33 +241,48 @@ def needs_update(max_age=UPDATE_EVERY):
 
 def update(progress=lambda text: None):
     """Download the threat feeds. Hashes accumulate; URL and host lists are replaced by the current ones.
-    The 43 MB full hash dump is imported on first run, or when the last update is older than the 48 h delta feed."""
+    The abuse.ch feeds are skipped (not failed) until the user adds their free key."""
     summary, errors = [], []
     with db() as con:
         sources = meta_get(con, "sources", {})
-        last_full = meta_get(con, "last_full", 0)
-        last_ok = meta_get(con, "last_update", 0)
-    plan = list(FEEDS)
-    if not last_full or time.time() - last_ok > 46 * 3600:
-        plan.insert(0, ("MalwareBazaar (full)", "hashzip", HASH_FULL))
+    key = abusech_key()
+    plan = [f for f in FEEDS if key or "{key}" not in f[2]]
+    skipped = [f[0] for f in FEEDS if f not in plan]
     for name, kind, url in plan:
         progress(f"Downloading {name}…")
         try:
-            data = _fetch(url, timeout=180 if kind == "hashzip" else 60)
-            if kind == "hashzip":
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    data = z.read(z.namelist()[0])
+            try:
+                data = _fetch(url.format(key=key), tries=1 if "{key}" in url else 3)
+            except urllib.error.HTTPError as e:  # never log the URL: it contains the key
+                raise RuntimeError("abuse.ch rejected the key" if e.code in (401, 403) else f"HTTP {e.code}") from None
             progress(f"Importing {name}…")
             with db() as con:
-                if kind in ("hash", "hashzip"):
-                    rows = [(bytes.fromhex(l[:64]), "MalwareBazaar") for l in _lines(data)
-                            if re.fullmatch(r"[0-9a-fA-F]{64}", l[:64])]
+                if kind == "hash":  # MalwareBazaar CSV: "first_seen_utc","sha256_hash",... - take the first SHA-256
+                    rows = [(bytes.fromhex(h), "MalwareBazaar") for r in _csv_rows(data)
+                            for h in [next((f for f in r if re.fullmatch(r"[0-9a-fA-F]{64}", f)), None)] if h]
+                    if not rows:
+                        raise RuntimeError("no signatures in the download")
                     before = con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0]
                     con.executemany("INSERT OR IGNORE INTO hashes VALUES (?, ?)", rows)
                     added = con.execute("SELECT COUNT(*) FROM hashes").fetchone()[0] - before
                     summary.append(f"{name}: +{added:,} signatures")
-                    if kind == "hashzip":
-                        meta_set(con, "last_full", time.time())
+                elif kind == "urlhaus":  # URLhaus CSV: "id","dateadded","url","url_status",... - keep online ones
+                    urls = [f for r in _csv_rows(data) if "online" in r for f in r if "://" in f]
+                    if not urls:
+                        raise RuntimeError("no live links in the download")
+                    hosts = set()
+                    for u in urls:
+                        host = (urlsplit(u).hostname or "").lower()
+                        try:
+                            ipaddress.ip_address(host)
+                        except ValueError:
+                            if host:
+                                hosts.add((host, "URLhaus hosts"))
+                    con.execute("DELETE FROM urls WHERE source=?", (name,))
+                    con.executemany("INSERT OR IGNORE INTO urls VALUES (?, ?)", {(normalize_url(u), name) for u in urls})
+                    con.execute("DELETE FROM hosts WHERE source='URLhaus hosts'")
+                    con.executemany("INSERT OR IGNORE INTO hosts VALUES (?, ?)", hosts)
+                    summary.append(f"{name}: {len(urls):,} links, {len(hosts):,} domains")
                 elif kind == "url":
                     rows = {(normalize_url(l), name) for l in _lines(data) if "://" in l}
                     con.execute("DELETE FROM urls WHERE source=?", (name,))
@@ -275,12 +310,7 @@ def update(progress=lambda text: None):
                     con.executemany("INSERT OR IGNORE INTO packages VALUES (?, ?)",
                                     {(r[1].strip(), f"stalkerware: {r[4].strip()}") for r in rows if len(r) >= 5})
                     summary.append(f"{name}: {len(hashes):,} spy-app fingerprints")
-                else:
-                    rows = {(l.split()[-1].lower(), name) for l in _lines(data) if len(l.split()) >= 2}
-                    con.execute("DELETE FROM hosts WHERE source=?", (name,))
-                    con.executemany("INSERT OR IGNORE INTO hosts VALUES (?, ?)", rows)
-                    summary.append(f"{name}: {len(rows):,} domains")
-                sources[name.replace(" (full)", "")] = time.time()
+                sources[name] = time.time()
                 meta_set(con, "sources", sources)
         except Exception as e:
             errors.append(f"{name}: {str(e)[:80]}")
@@ -290,8 +320,10 @@ def update(progress=lambda text: None):
     if errors and len(errors) == len(plan):
         log_event("update", "warn", "Threat feed update failed", "; ".join(errors))
     else:
-        log_event("update", "warn" if errors else "ok", "Threat feeds updated",
-                  "; ".join(summary + [f"failed: {e}" for e in errors]))
+        notes = [f"failed: {e}" for e in errors]
+    if skipped:
+        notes.append(f"skipped {' and '.join(skipped)}: add your free abuse.ch key in Engine > Threat intelligence")
+    log_event("update", "warn" if errors or skipped else "ok", "Threat feeds updated", "; ".join(summary + notes))
     return summary, errors
 
 

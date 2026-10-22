@@ -80,6 +80,36 @@ def find_mpcmdrun():
     return fallback if os.path.exists(fallback) else None
 
 
+class _Blob(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi(data, protect):
+    buf = ctypes.create_string_buffer(data, len(data))
+    src, out = _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), _Blob()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(src), None, None, None, None, 0, ctypes.byref(out)):
+        raise OSError("Windows could not encrypt/decrypt the key")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+
+def encrypt_secret(text):
+    """API keys are stored encrypted with Windows DPAPI, so only this Windows account can read them."""
+    return base64.b64encode(_dpapi(text.encode(), True)).decode() if text else ""
+
+
+def decrypt_secret(enc):
+    if not enc:
+        return None
+    try:
+        return _dpapi(base64.b64decode(enc), False).decode()
+    except (OSError, ValueError):
+        return None
+
+
 class SHQUERYRBINFO(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("i64Size", ctypes.c_int64), ("i64NumItems", ctypes.c_int64)]
 
@@ -297,7 +327,7 @@ DEFAULT_SETTINGS = {
               "categories": ["User temporary files", "Crash dumps & error reports", "Thumbnail cache"],
               "min_free_gb": 0, "run_missed": True, "skip_on_battery": True, "idle": True, "notify": True},
     "engine": {"realtime": False, "auto_update": True, "auto_quarantine": True, "download_protection": True,
-               "hold_downloads": True,
+               "hold_downloads": True, "abusech_key": "",  # DPAPI-encrypted, like the AI key
                "folders": [os.path.join(os.path.expanduser("~"), "Downloads"),
                            os.path.join(os.path.expanduser("~"), "Desktop")]},
     "ai": {"enabled": False, "key": ""},  # key is DPAPI-encrypted: only this Windows account can read it

@@ -7,17 +7,14 @@ verdict or triggers an action. Whole files are never uploaded.
 Needs an Anthropic API key (pay-as-you-go). It is stored encrypted with Windows DPAPI, so only this Windows
 account can read it; the ANTHROPIC_API_KEY environment variable works too.
 """
-import base64
-import ctypes
 import importlib.util
 import json
 import os
 import re
 import struct
-from ctypes import wintypes
 
 import engine
-from core import SETTINGS_FILE, load_settings, write_json
+from core import SETTINGS_FILE, decrypt_secret, encrypt_secret, load_settings, write_json
 
 MODEL = "claude-opus-5-5"
 HOME = os.path.expanduser("~")
@@ -53,25 +50,9 @@ it if you know the sender, change a password, report the message)."""
 
 # ---------------------------------------------------------------- API key, encrypted with Windows DPAPI
 
-class _Blob(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-
-def _dpapi(data, protect):
-    buf = ctypes.create_string_buffer(data, len(data))
-    src, out = _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), _Blob()
-    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(src), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("Windows could not encrypt/decrypt the API key")
-    try:
-        return ctypes.string_at(out.pbData, out.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)
-
-
 def save_key(key):
     settings = load_settings()
-    settings["ai"]["key"] = base64.b64encode(_dpapi(key.strip().encode(), True)).decode() if key else ""
+    settings["ai"]["key"] = encrypt_secret(key.strip())
     settings["ai"]["enabled"] = bool(key)
     write_json(SETTINGS_FILE, settings)
     engine.log_event("ai", "info", "AI analysis " + ("turned on" if key else "turned off (key removed)"))
@@ -80,13 +61,7 @@ def save_key(key):
 def get_key():
     if os.environ.get("ANTHROPIC_API_KEY"):
         return os.environ["ANTHROPIC_API_KEY"]
-    enc = load_settings()["ai"]["key"]
-    if not enc:
-        return None
-    try:
-        return _dpapi(base64.b64decode(enc), False).decode()
-    except (OSError, ValueError):
-        return None
+    return decrypt_secret(load_settings()["ai"]["key"])
 
 
 def available():
