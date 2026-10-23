@@ -33,23 +33,25 @@ from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_
 
 # ---------------------------------------------------------------- design tokens
 
-BG = "#0b0f0d"
+BG = "#040605"
 SIDEBAR = "#070a09"
-SURFACE = "#111714"
-SURFACE_2 = "#171f1b"
-HOVER = "#1f2924"
-BORDER = "#232d28"
-TRACK = "#1c2520"
-TEXT = "#ecebe6"
-MUTED = "#9a9f98"
-SUBTLE = "#5f6660"
-ACCENT = "#c8a45d"
-ACCENT_HOVER = "#dbbb7a"
-ACCENT_DIM = "#2e2819"
-ON_ACCENT = "#16130c"  # text and knobs on gold
-OK, OK_DIM = "#4cc38a", "#13291f"
-WARN, WARN_DIM = "#dd8a4e", "#32231a"
-BAD, BAD_DIM = "#e2665f", "#331a18"
+SURFACE = "#0d1110"
+SURFACE_2 = "#151b19"
+HOVER = "#1b2321"
+BORDER = "#18201d"
+TRACK = "#1a2220"
+TEXT = "#f2f5f3"
+MUTED = "#8a948f"
+SUBTLE = "#535d58"
+ACCENT = "#34c48e"
+ACCENT_HOVER = "#5ad8a8"
+ACCENT_DIM = "#0c211a"
+ACCENT_LINE = "#1d4c3b"  # hairline outline of primary buttons
+GOLD = "#c9a45c"  # the logo's gold, used only as a small brand detail
+ON_ACCENT = "#00140c"  # text and knobs on the accent
+OK, OK_DIM = "#34c48e", "#0c211a"
+WARN, WARN_DIM = "#e3a34e", "#2b2010"
+BAD, BAD_DIM = "#e8615a", "#2e1413"
 TONES = {"ok": (OK, OK_DIM), "warn": (WARN, WARN_DIM), "bad": (BAD, BAD_DIM), "info": (ACCENT, ACCENT_DIM)}
 
 ICONS = {"home": "", "scan": "", "shield": "", "warning": "", "clean": "",
@@ -85,13 +87,16 @@ def init_fonts(root):
 
     def pick(*names):
         return next((n for n in names if n in families), "Segoe UI")
-    ui, display = pick("Segoe UI Variable Text", "Segoe UI"), pick("Segoe UI Variable Display", "Segoe UI")
+    ui = pick("Segoe UI Variable Text", "Segoe UI")
+    light = pick("Segoe UI Variable Display Semil", "Segoe UI Semilight", "Segoe UI")
+    semi = pick("Segoe UI Variable Display Semib", "Segoe UI Semibold", "Segoe UI")
+    text_semi = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold", "Segoe UI")
     icon, mono = pick("Segoe Fluent Icons", "Segoe MDL2 Assets"), pick("Cascadia Mono", "Consolas")
     F.update({
-        "body": (ui, 10), "body_b": (ui, 10, "bold"), "small": (ui, 9), "small_b": (ui, 9, "bold"),
-        "caption": (ui, 8, "bold"), "h1": (display, 20, "bold"), "h2": (display, 13, "bold"),
-        "h3": (display, 15, "bold"), "hero": (display, 22, "bold"), "big": (display, 28, "bold"),
-        "brand": (display, 14, "bold"), "nav": (ui, 10), "button": (ui, 10, "bold"),
+        "body": (ui, 10), "body_b": (text_semi, 10), "small": (ui, 9), "small_b": (text_semi, 9),
+        "caption": (text_semi, 8), "h1": (light, 24), "h2": (semi, 13),
+        "h3": (light, 15), "hero": (light, 26), "big": (light, 32),
+        "brand": (semi, 14), "nav": (ui, 10), "button": (text_semi, 10),
         "icon": (icon, 13), "icon_sm": (icon, 11), "icon_lg": (icon, 20), "icon_xl": (icon, 36), "mono": (mono, 9),
     })
 
@@ -132,9 +137,22 @@ def divider(parent, **pack):
 # ---------------------------------------------------------------- components
 
 class Card(tk.Frame):
-    def __init__(self, parent, padding=20, bg=SURFACE, **kw):
-        super().__init__(parent, bg=bg, highlightthickness=1, highlightbackground=BORDER, highlightcolor=BORDER,
-                         padx=px(padding), pady=px(padding), **kw)
+    """Borderless panel with rounded corners. Tk frames can't be rounded, so each corner gets a small canvas
+    painted in the parent's colour with a quarter circle of the card's; it sits in the padding, under no content."""
+
+    def __init__(self, parent, padding=20, bg=SURFACE, radius=16, **kw):
+        super().__init__(parent, bg=bg, highlightthickness=0, padx=px(padding), pady=px(padding), **kw)
+        r = px(min(radius, padding))
+        if r < 2:
+            return
+        for corner in ("nw", "ne", "sw", "se"):
+            c = tk.Canvas(self, width=r, height=r, bg=parent["bg"], highlightthickness=0, bd=0)
+            x0, y0 = (0 if corner[1] == "w" else -r), (0 if corner[0] == "n" else -r)
+            c.create_oval(x0, y0, x0 + 2 * r, y0 + 2 * r, fill=bg, outline=bg)
+            # place() measures from inside the padding, so step back out to the card's real edge
+            pad = px(padding)
+            c.place(relx=0 if corner[1] == "w" else 1, rely=0 if corner[0] == "n" else 1, anchor=corner,
+                    x=-pad if corner[1] == "w" else pad, y=-pad if corner[0] == "n" else pad)
 
 
 class CanvasWidget(tk.Canvas):
@@ -178,10 +196,10 @@ class CanvasWidget(tk.Canvas):
 
 class Button(CanvasWidget):
     STYLES = {  # fill, hover fill, text, border
-        "primary": (ACCENT, ACCENT_HOVER, ON_ACCENT, None),
-        "secondary": (SURFACE_2, HOVER, TEXT, BORDER),
+        "primary": (ACCENT_DIM, "#113026", ACCENT_HOVER, ACCENT_LINE),
+        "secondary": (SURFACE_2, HOVER, TEXT, None),
         "ghost": (None, SURFACE_2, ACCENT, None),
-        "danger": (BAD_DIM, "#43211e", BAD, None),
+        "danger": (BAD_DIM, "#3d1a18", BAD, "#5a2421"),
     }
 
     def __init__(self, parent, text, command=None, kind="secondary", icon=None, width=None, height=36):
@@ -189,7 +207,7 @@ class Button(CanvasWidget):
         tf, icf = tkfont.Font(font=F["button"]), tkfont.Font(font=F["icon_sm"])
         self._tw = tf.measure(text)
         self._iw = icf.measure(ICONS[icon]) + px(8) if icon else 0
-        super().__init__(parent, width=width or self._tw + self._iw + px(34), height=px(height))
+        super().__init__(parent, width=width or self._tw + self._iw + px(40), height=px(height))
         self.bind("<ButtonRelease-1>", self._click)
         self.bind("<Configure>", lambda _e: self._draw())
         self._draw()
@@ -208,7 +226,7 @@ class Button(CanvasWidget):
         elif self._hover:
             fill = hover
         if fill:
-            round_rect(self, 1, 1, w - 1, h - 1, px(8), fill=fill, outline=border or fill)
+            round_rect(self, 1, 1, w - 1, h - 1, (h - 2) / 2, fill=fill, outline=border or fill)
         x = (w - self._tw - self._iw) / 2
         if self.icon:
             self.create_text(x, h / 2 + 1, text=ICONS[self.icon], font=F["icon_sm"], fill=fg, anchor="w")
@@ -359,26 +377,115 @@ class StackedBar(tk.Canvas):
 
 
 class StatusRing(tk.Canvas):
-    """The dashboard's protection indicator; spins while a scan runs."""
+    """The dashboard's protection indicator: a slowly turning orb of glowing dotted contour lines, tinted by the
+    protection tone, that spins faster while a scan runs. Frames are rendered once per tone with Pillow on a worker
+    thread; each tick only swaps an image, and it idles while the dashboard is hidden. Without Pillow it falls back
+    to a flat ring."""
 
-    def __init__(self, parent, size=148):
+    FRAMES, SS = 48, 2
+
+    def __init__(self, parent, size=196):
         self.size = px(size)
         super().__init__(parent, width=self.size, height=self.size, bg=parent["bg"], highlightthickness=0)
-        self.tone, self.angle, self._anim = "info", 0, None
-        self._draw()
+        self.tone, self.angle, self._anim, self.idx = "info", 0, None, 0
+        self.frames, self._pending, self._rendering = {}, None, None
+        self.item = self.create_image(self.size / 2, self.size / 2, anchor="center")
+        self.glyph = self.create_text(self.size / 2, self.size / 2 + 1, text="", font=F["icon_xl"], fill=TEXT)
+        self._spinning = False
+        if Image is None:
+            self._draw()
+        else:
+            self._render(self.tone)
+            self._loop()
 
     def set(self, tone):
         self.tone = tone
-        self._draw()
+        if Image is None:
+            self._draw()
+        else:
+            self._render(tone)
+            self._glyph()
 
     def spin(self, on):
-        if on and not self._anim:
-            self._tick()
-        elif not on and self._anim:
-            self.after_cancel(self._anim)
-            self._anim = None
-            self._draw()
+        self._spinning = bool(on)
+        if Image is None:
+            if on and not self._anim:
+                self._tick()
+            elif not on and self._anim:
+                self.after_cancel(self._anim)
+                self._anim = None
+                self._draw()
+        else:
+            self._glyph()
 
+    # ---- orb
+    def _shown_tone(self):
+        return "info" if self._spinning else self.tone
+
+    def _glyph(self):
+        tone = self._shown_tone()
+        glyph = ICONS["shield"] if tone in ("ok", "info") else ICONS["warning"]
+        self.itemconfigure(self.glyph, text=glyph, fill=TEXT if tone in ("ok", "info") else TONES[tone][0])
+
+    def _render(self, tone):
+        color, bgcol = TONES[tone][0], self["bg"]
+        if color in self.frames or self._rendering == color:
+            return
+        self._rendering = color
+
+        def work():
+            self._pending = (color, [self._orb_frame(k, color, bgcol) for k in range(self.FRAMES)])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _orb_frame(self, k, color, bgcol):
+        n = self.size * self.SS
+        lat = np.linspace(0.18, np.pi - 0.18, 36)[:, None]
+        lon = np.linspace(0, 2 * np.pi, 150, endpoint=False)[None, :]
+        r = 1 + 0.13 * np.sin(3 * lon + 2 * lat) + 0.08 * np.sin(5 * lat - 2 * lon + 1) + 0.05 * np.cos(4 * lon)
+        x, y, z = r * np.sin(lat) * np.cos(lon), r * np.cos(lat), r * np.sin(lat) * np.sin(lon)
+        a = 2 * np.pi * k / self.FRAMES
+        x, z = x * np.cos(a) + z * np.sin(a), -x * np.sin(a) + z * np.cos(a)
+        t = 0.35
+        y, z = y * np.cos(t) - z * np.sin(t), y * np.sin(t) + z * np.cos(t)
+        R = n * 0.36
+        px_, py_ = (n / 2 + R * x).astype(int).ravel(), (n / 2 + R * y).astype(int).ravel()
+        rim = np.clip(np.hypot(x, y) / r, 0, 1).ravel() ** 3   # dots near the silhouette glow brightest
+        front = np.where(z.ravel() > 0, 1.0, 0.4)
+        acc = np.zeros((n, n), np.float32)
+        ok = (px_ >= 0) & (px_ < n) & (py_ >= 0) & (py_ < n)
+        np.add.at(acc, (py_[ok], px_[ok]), ((0.25 + 0.9 * rim) * front)[ok])
+        dots = np.asarray(Image.fromarray(np.clip(acc * 255, 0, 255).astype(np.uint8)).filter(
+            ImageFilter.GaussianBlur(0.6 * self.SS)), np.float32) / 255
+        small = Image.fromarray(np.clip(acc * 120, 0, 255).astype(np.uint8)).resize((n // 4, n // 4), Image.BOX)
+        glow = np.asarray(small.filter(ImageFilter.GaussianBlur(9 * self.SS / 4)).resize((n, n), Image.BILINEAR),
+                          np.float32) / 255
+        if getattr(self, "_core", None) is None or self._core.shape[0] != n:
+            yy, xx = np.mgrid[0:n, 0:n]
+            self._core = np.exp(-((xx - n / 2) ** 2 + (yy - n / 2) ** 2) / (2 * (n * 0.16) ** 2)) * 0.5
+        inten = np.clip(dots * 1.8 + glow * 6 + self._core, 0, 1.6)[..., None]
+        c = np.array(Image.new("RGB", (1, 1), color).getpixel((0, 0)), np.float32)
+        b = np.array(Image.new("RGB", (1, 1), bgcol).getpixel((0, 0)), np.float32)
+        rgb = b + inten * (c - b) + np.clip(inten - 1, 0, 1) * (255 - c) * 0.8  # hot spots go toward white
+        img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
+        return img.resize((self.size, self.size), Image.LANCZOS)
+
+    def _loop(self):
+        if self._pending:
+            color, imgs = self._pending
+            self._pending, self._rendering = None, None
+            self.frames[color] = [ImageTk.PhotoImage(im) for im in imgs]
+            self._glyph()
+        color = TONES[self._shown_tone()][0]
+        frames = self.frames.get(color) or next(iter(self.frames.values()), None)
+        visible = self.winfo_ismapped()
+        if frames and visible:
+            self.idx = (self.idx + (3 if self._spinning else 1)) % len(frames)
+            self.itemconfigure(self.item, image=frames[self.idx])
+        if color not in self.frames:
+            self._render(self._shown_tone())
+        self.after(60 if visible else 500, self._loop)
+
+    # ---- flat fallback (no Pillow)
     def _tick(self):
         self.angle = (self.angle - 6) % 360
         self._draw()
@@ -411,7 +518,7 @@ class SpiralFunnel(tk.Canvas):
 
     THREADS, SEGMENTS, FRAMES, FINALE, FADE, SS = 21, 56, 60, 34, 14, 2
     MIN_SHOW = 2.6  # seconds: even a quick clean gets a visible moment
-    BLUE = [(0.0, "#3a2f1a"), (0.45, "#b8955a"), (0.75, "#e3cb98"), (1.0, "#fdf8ee")]  # gold, kept the name
+    BLUE = [(0.0, "#06291c"), (0.45, "#1fa877"), (0.75, "#7ff0c4"), (1.0, "#f2fff9")]  # accent green, kept the name
     GREEN = [(0.0, "#12291f"), (0.45, "#3a9e72"), (0.75, "#86d4ae"), (1.0, "#f2fbf6")]
 
     def __init__(self, parent, groups, width=680, height=170):
@@ -675,7 +782,7 @@ class NavItem(tk.Frame):
         self._paint()
 
     def _paint(self, hover=False):
-        bg = SURFACE_2 if self.active else (SURFACE if hover else SIDEBAR)
+        bg = SURFACE if hover and not self.active else SIDEBAR
         self.bar.configure(bg=ACCENT if self.active else SIDEBAR)
         for w in (self.inner, self.icon, self.text):
             w.configure(bg=bg)
@@ -687,8 +794,7 @@ class Segmented(tk.Frame):
     """Tab strip that switches between content frames."""
 
     def __init__(self, parent, items, on_change):
-        super().__init__(parent, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER, padx=px(4),
-                         pady=px(4))
+        super().__init__(parent, bg=SURFACE, padx=px(4), pady=px(4))
         self.buttons, self.on_change = {}, on_change
         for key, text in items:
             b = tk.Label(self, text=text, font=F["small_b"], bg=SURFACE, fg=MUTED, padx=px(16), pady=px(7),
@@ -699,7 +805,7 @@ class Segmented(tk.Frame):
 
     def select(self, key):
         for k, b in self.buttons.items():
-            b.configure(bg=SURFACE_2 if k == key else SURFACE, fg=TEXT if k == key else MUTED)
+            b.configure(bg=SURFACE_2 if k == key else SURFACE, fg=ACCENT_HOVER if k == key else MUTED)
         self.on_change(key)
 
 
@@ -737,8 +843,7 @@ def ago(ts):
 
 
 def badge(parent, text, tone="info"):
-    fg, bg = TONES[tone]
-    return tk.Label(parent, text=f" {text} ", font=F["caption"], fg=fg, bg=bg, padx=px(6), pady=px(2))
+    return tk.Label(parent, text=f"●  {text}", font=F["caption"], fg=TONES[tone][0], bg=parent["bg"], pady=px(2))
 
 
 def setting_row(parent, title, desc=None, first=False):
@@ -921,7 +1026,7 @@ class App(tk.Tk):
         names = frame(brand)
         names.pack(side="left", padx=px(12))
         label(names, "Kavacham", "brand").pack(anchor="w")
-        label(names, "Your Digital Shield", "small", MUTED).pack(anchor="w")
+        label(names, "YOUR DIGITAL SHIELD", "caption", GOLD).pack(anchor="w", pady=(px(1), 0))
 
         label(side, "MENU", "caption", SUBTLE).pack(anchor="w", padx=px(26), pady=(px(6), px(6)))
         self.nav = {}
@@ -1067,7 +1172,7 @@ class App(tk.Tk):
     def _set_status(self, tone, tag, title, sub):
         fg, bgc = TONES[tone]
         self.ring.set(tone)
-        self.status_badge.configure(text=f" {tag} ", fg=fg, bg=bgc)
+        self.status_badge.configure(text=f"●  {tag}", fg=fg)
         self.status_title.configure(text=title)
         self.status_sub.configure(text=sub)
 
@@ -1659,7 +1764,7 @@ class App(tk.Tk):
                 on = self.settings["engine"]["realtime"]
                 text, tone = ("ON", "ok") if on and running else ("STARTING", "info") if on else ("OFF", "warn")
                 fg, bgc = TONES[tone]
-                self.eng_rt_badge.configure(text=f" {text} ", fg=fg, bg=bgc)
+                self.eng_rt_badge.configure(text=f"●  {text}", fg=fg)
                 self.eng_folders.configure(text="\n".join(self.settings["engine"]["folders"]) or "No folders")
             self.ui(apply)
         self.bg(work)
