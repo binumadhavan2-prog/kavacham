@@ -391,6 +391,11 @@ class StatusRing(tk.Canvas):
         self.frames, self._pending, self._rendering = {}, None, None
         self.item = self.create_image(self.size / 2, self.size / 2, anchor="center")
         self.glyph = self.create_text(self.size / 2, self.size / 2 + 1, text="", font=F["icon_xl"], fill=TEXT)
+        self.emblem_img = self._emblem()
+        if self.emblem_img:
+            self.create_image(self.size / 2, self.size / 2, image=self.emblem_img, anchor="center")
+            # on a problem a small warning sign sits on the emblem's lower right
+            self.glyph = self.create_text(self.size / 2 + px(30), self.size / 2 + px(30), text="", font=F["icon"])
         self._spinning = False
         if Image is None:
             self._draw()
@@ -422,10 +427,27 @@ class StatusRing(tk.Canvas):
     def _shown_tone(self):
         return "info" if self._spinning else self.tone
 
+    def _emblem(self):
+        """The Kavacham emblem, cut to a circle with a soft edge so it melts into the orb's glow."""
+        path = os.path.join(ASSETS, "logo.png")
+        if Image is None or not os.path.exists(path):
+            return None
+        d, ss = px(84), 4
+        img = Image.open(path).convert("RGBA").resize((d, d), Image.LANCZOS)
+        mask = Image.new("L", (d * ss, d * ss), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, d * ss - 1, d * ss - 1), fill=255)
+        mask = mask.resize((d, d), Image.LANCZOS).filter(ImageFilter.GaussianBlur(px(1)))
+        img.putalpha(mask)
+        return ImageTk.PhotoImage(img)
+
     def _glyph(self):
         tone = self._shown_tone()
-        glyph = ICONS["shield"] if tone in ("ok", "info") else ICONS["warning"]
-        self.itemconfigure(self.glyph, text=glyph, fill=TEXT if tone in ("ok", "info") else TONES[tone][0])
+        ok = tone in ("ok", "info")
+        if self.emblem_img:
+            self.itemconfigure(self.glyph, text="" if ok else ICONS["warning"], fill=TONES[tone][0])
+            return
+        glyph = ICONS["shield"] if ok else ICONS["warning"]
+        self.itemconfigure(self.glyph, text=glyph, fill=TEXT if ok else TONES[tone][0])
 
     def _render(self, tone):
         color, bgcol = TONES[tone][0], self["bg"]
