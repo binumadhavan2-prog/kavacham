@@ -1,4 +1,4 @@
-"""PC Guard engine: PC Guard's own detection layer, running next to Microsoft Defender.
+"""Kavacham engine: Kavacham's own detection layer, running next to Microsoft Defender.
 
 - File scanner with SHA-256 fingerprints, matched against a local signature database (MalwareBazaar)
 - Heuristic rules for suspicious files (disguised programs, hostile scripts, auto-running macros, ...)
@@ -883,13 +883,13 @@ def _check_new(path, cfg):
                   f"{kind}: {r['verdict']} - {r['name']}", f"{r['path']}{source} · " + "; ".join(r["reasons"]))
         if r["verdict"] == "Malware" and cfg.get("auto_quarantine", True):
             if quarantine(r["path"], "; ".join(r["reasons"]), r["sha256"]):
-                notify("PC Guard blocked a threat", f"{r['name']}: {r['reasons'][0]}. It was quarantined.")
+                notify("Kavacham blocked a threat", f"{r['name']}: {r['reasons'][0]}. It was quarantined.")
         elif r["verdict"] == "Suspicious" and is_download and cfg.get("hold_downloads", True):
             if quarantine(r["path"], "Held for review: " + "; ".join(r["reasons"]), r["sha256"]):
-                notify("PC Guard held a download", f"{r['name']} looks suspicious ({r['reasons'][0]}). "
-                                                    "Review it in PC Guard > Quarantine before opening it.")
+                notify("Kavacham held a download", f"{r['name']} looks suspicious ({r['reasons'][0]}). "
+                                                    "Review it in Kavacham > Quarantine before opening it.")
         elif r["verdict"] != "Worth a look":
-            notify("PC Guard: suspicious file", f"{r['name']}: {r['reasons'][0]}. Open PC Guard to review it.")
+            notify("Kavacham: suspicious file", f"{r['name']}: {r['reasons'][0]}. Open Kavacham to review it.")
 
 
 def set_monitor(enabled):
@@ -906,7 +906,7 @@ $a = New-ScheduledTaskAction -Execute {ps_quote(pythonw())} -Argument {ps_quote(
 $t = New-ScheduledTaskTrigger -AtLogOn -User {user}
 $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 $p = New-ScheduledTaskPrincipal -UserId {user} -LogonType Interactive -RunLevel {"Highest" if is_admin() else "Limited"}
-Register-ScheduledTask -TaskName {name} -Action $a -Trigger $t -Settings $s -Principal $p -Description 'Created by PC Guard' -Force | Out-Null
+Register-ScheduledTask -TaskName {name} -Action $a -Trigger $t -Settings $s -Principal $p -Description 'Created by Kavacham' -Force | Out-Null
 """
     out = run_ps(script)
     err = None

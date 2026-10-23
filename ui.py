@@ -1,4 +1,4 @@
-"""PC Guard user interface: a dark, Windows 11 style front end for core.py."""
+"""Kavacham user interface: a dark, Windows 11 style front end for core.py."""
 import ctypes
 import heapq
 import math
@@ -20,9 +20,11 @@ try:  # optional: richer cleaning animation
 except ImportError:
     Image = None
 
-import ai
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
 import alerts
 import engine
+import explain
 import usb
 from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_FILE, TASK_NAMES, add_history, empty_recycle_bin,
                   find_duplicates, find_mpcmdrun, fixed_drives, human, is_admin, load_settings, notify, measure, clean, powershell_json,
@@ -31,22 +33,23 @@ from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_
 
 # ---------------------------------------------------------------- design tokens
 
-BG = "#0d1117"
-SIDEBAR = "#090c10"
-SURFACE = "#131920"
-SURFACE_2 = "#1a222c"
-HOVER = "#222c38"
-BORDER = "#232d39"
-TRACK = "#202933"
-TEXT = "#e6edf3"
-MUTED = "#8b98a6"
-SUBTLE = "#55606c"
-ACCENT = "#4c8dff"
-ACCENT_HOVER = "#6ea3ff"
-ACCENT_DIM = "#18294a"
-OK, OK_DIM = "#3dd68c", "#10301f"
-WARN, WARN_DIM = "#f5b544", "#352810"
-BAD, BAD_DIM = "#ff6b6b", "#3a171a"
+BG = "#0b0f0d"
+SIDEBAR = "#070a09"
+SURFACE = "#111714"
+SURFACE_2 = "#171f1b"
+HOVER = "#1f2924"
+BORDER = "#232d28"
+TRACK = "#1c2520"
+TEXT = "#ecebe6"
+MUTED = "#9a9f98"
+SUBTLE = "#5f6660"
+ACCENT = "#c8a45d"
+ACCENT_HOVER = "#dbbb7a"
+ACCENT_DIM = "#2e2819"
+ON_ACCENT = "#16130c"  # text and knobs on gold
+OK, OK_DIM = "#4cc38a", "#13291f"
+WARN, WARN_DIM = "#dd8a4e", "#32231a"
+BAD, BAD_DIM = "#e2665f", "#331a18"
 TONES = {"ok": (OK, OK_DIM), "warn": (WARN, WARN_DIM), "bad": (BAD, BAD_DIM), "info": (ACCENT, ACCENT_DIM)}
 
 ICONS = {"home": "", "scan": "", "shield": "", "warning": "", "clean": "",
@@ -175,10 +178,10 @@ class CanvasWidget(tk.Canvas):
 
 class Button(CanvasWidget):
     STYLES = {  # fill, hover fill, text, border
-        "primary": (ACCENT, ACCENT_HOVER, "#ffffff", None),
+        "primary": (ACCENT, ACCENT_HOVER, ON_ACCENT, None),
         "secondary": (SURFACE_2, HOVER, TEXT, BORDER),
         "ghost": (None, SURFACE_2, ACCENT, None),
-        "danger": (BAD_DIM, "#4a1c20", BAD, None),
+        "danger": (BAD_DIM, "#43211e", BAD, None),
     }
 
     def __init__(self, parent, text, command=None, kind="secondary", icon=None, width=None, height=36):
@@ -238,7 +241,7 @@ class Toggle(CanvasWidget):
         round_rect(self, 1, 1, w - 1, h - 1, h / 2, fill=track, outline=track if on else BORDER)
         d, m = h - px(8), px(4)
         x = w - m - d - 1 if on else m + 1
-        knob = "#ffffff" if on else (MUTED if not self.disabled else SUBTLE)
+        knob = ON_ACCENT if on else (MUTED if not self.disabled else SUBTLE)
         self.create_oval(x, m, x + d, m + d, fill=knob, outline=knob)
 
 
@@ -408,8 +411,8 @@ class SpiralFunnel(tk.Canvas):
 
     THREADS, SEGMENTS, FRAMES, FINALE, FADE, SS = 21, 56, 60, 34, 14, 2
     MIN_SHOW = 2.6  # seconds: even a quick clean gets a visible moment
-    BLUE = [(0.0, "#1b2f7a"), (0.45, "#3d6fff"), (0.75, "#6fc8ff"), (1.0, "#f2fbff")]
-    GREEN = [(0.0, "#0f3a2a"), (0.45, "#1fae6c"), (0.75, "#5fe3a4"), (1.0, "#f0fff7")]
+    BLUE = [(0.0, "#3a2f1a"), (0.45, "#b8955a"), (0.75, "#e3cb98"), (1.0, "#fdf8ee")]  # gold, kept the name
+    GREEN = [(0.0, "#12291f"), (0.45, "#3a9e72"), (0.75, "#86d4ae"), (1.0, "#f2fbf6")]
 
     def __init__(self, parent, groups, width=680, height=170):
         super().__init__(parent, height=px(height), bg=parent["bg"], highlightthickness=0, bd=0)
@@ -810,7 +813,11 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         init_fonts(self)
-        self.title("PC Guard")
+        self.title("Kavacham")
+        try:
+            self.iconbitmap(os.path.join(ASSETS, "logo.ico"))
+        except tk.TclError:
+            pass
         self.geometry(f"{px(1180)}x{px(760)}")
         self.minsize(px(1020), px(680))
         self.configure(bg=BG)
@@ -899,13 +906,22 @@ class App(tk.Tk):
         brand = frame(side, padx=px(22), pady=px(24))
         brand.pack(fill="x")
         logo = tk.Canvas(brand, width=px(38), height=px(38), bg=SIDEBAR, highlightthickness=0)
-        round_rect(logo, 0, 0, px(38), px(38), px(10), fill=ACCENT, outline=ACCENT)
-        logo.create_text(px(19), px(20), text=ICONS["shield"], font=F["icon_lg"], fill="#ffffff")
+        logo_file = os.path.join(ASSETS, "logo.png")
+        if Image and os.path.exists(logo_file):
+            img = Image.open(logo_file).convert("RGBA").resize((px(38), px(38)), Image.LANCZOS)
+            mask = Image.new("L", img.size, 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, img.size[0] - 1, img.size[1] - 1), px(10), fill=255)
+            img.putalpha(mask)
+            self.logo_photo = ImageTk.PhotoImage(img)
+            logo.create_image(0, 0, image=self.logo_photo, anchor="nw")
+        else:
+            round_rect(logo, 0, 0, px(38), px(38), px(10), fill=ACCENT, outline=ACCENT)
+            logo.create_text(px(19), px(20), text=ICONS["shield"], font=F["icon_lg"], fill=ON_ACCENT)
         logo.pack(side="left")
         names = frame(brand)
         names.pack(side="left", padx=px(12))
-        label(names, "PC Guard", "brand").pack(anchor="w")
-        label(names, "Security & cleanup", "small", MUTED).pack(anchor="w")
+        label(names, "Kavacham", "brand").pack(anchor="w")
+        label(names, "Your Digital Shield", "small", MUTED).pack(anchor="w")
 
         label(side, "MENU", "caption", SUBTLE).pack(anchor="w", padx=px(26), pady=(px(6), px(6)))
         self.nav = {}
@@ -1044,7 +1060,7 @@ class App(tk.Tk):
         self._draw_disks()
         if not self.mpcmd:
             self._set_status("bad", "DEFENDER MISSING", "Microsoft Defender not found",
-                             "PC Guard uses Microsoft Defender to scan. Make sure Windows Security is installed.")
+                             "Kavacham uses Microsoft Defender to scan. Make sure Windows Security is installed.")
             return
         self.bg(self._load_status)
 
@@ -1189,10 +1205,10 @@ class App(tk.Tk):
 
     def _run_mpcmd(self, args, text, is_scan=False):
         if self.scan_proc:
-            messagebox.showinfo("PC Guard", "A scan or update is already running.")
+            messagebox.showinfo("Kavacham", "A scan or update is already running.")
             return
         if not self.mpcmd:
-            messagebox.showerror("PC Guard", "Microsoft Defender (MpCmdRun.exe) was not found.")
+            messagebox.showerror("Kavacham", "Microsoft Defender (MpCmdRun.exe) was not found.")
             return
         self.scan_log.delete("1.0", "end")
         self.scan_status.configure(text=text, fg=TEXT)
@@ -1333,7 +1349,7 @@ class App(tk.Tk):
 
     def remove_threats(self):
         if not is_admin():
-            if messagebox.askyesno("PC Guard", "Removing threats needs administrator rights.\nRestart as admin now?"):
+            if messagebox.askyesno("Kavacham", "Removing threats needs administrator rights.\nRestart as admin now?"):
                 self._elevate()
             return
         self.threat_summary.configure(text="Removing threats…")
@@ -1343,15 +1359,15 @@ class App(tk.Tk):
             self._load_threats()
         self.bg(work)
 
-    # ---------------------------------------------------------- PC Guard engine
+    # ---------------------------------------------------------- Kavacham engine
     def _page_engine(self):
-        p = self.page("PC Guard engine", "PC Guard's own detection layer: malware signatures, heuristic rules and "
+        p = self.page("Kavacham engine", "Kavacham's own detection layer: malware signatures, heuristic rules and "
                                          "link checks, working alongside Microsoft Defender.")
         self.eng_results, self.eng_busy, self._eng_cancel = [], False, False
         holder = frame(p)
         self.eng_frames = {}
         self.eng_tabs = Segmented(p, [("scan", "Scan"), ("protect", "Real-time & downloads"),
-                                      ("links", "Web protection"), ("ai", "AI analysis")], self._switch_engine)
+                                      ("links", "Web protection")], self._switch_engine)
         self.eng_tabs.pack(anchor="w", pady=(0, px(16)))
         holder.pack(fill="both", expand=True)
 
@@ -1392,9 +1408,9 @@ class App(tk.Tk):
         Button(acts, "Quarantine selected", self.engine_quarantine_selected, "danger", icon="stop").pack(side="left")
         Button(acts, "Mark as safe", self.engine_mark_safe, "secondary", icon="check").pack(side="left",
                                                                                             padx=px(8))
-        Button(acts, "Explain with AI", self.ai_explain_selected, "secondary", icon="search").pack(side="left")
-        Button(acts, "Open file location", self.engine_open_location, "ghost", icon="open").pack(side="left",
-                                                                                            padx=(px(8), 0))
+        Button(acts, "What does this mean?", self.engine_explain_selected, "secondary", icon="search").pack(
+            side="left", padx=(0, px(8)))
+        Button(acts, "Open file location", self.engine_open_location, "ghost", icon="open").pack(side="left")
 
 
         # -- real-time & updates tab
@@ -1447,7 +1463,7 @@ class App(tk.Tk):
         self.eng_rt_badge.pack(side="left")
         Toggle(head, self.eng_vars["realtime"], command=self.engine_toggle_realtime).pack(side="right")
         label(rt, "New and changed files in the folders below are checked the moment they finish downloading or "
-                  "copying. Runs in the background, also when PC Guard is closed, and starts when you sign in.",
+                  "copying. Runs in the background, also when Kavacham is closed, and starts when you sign in.",
               "small", MUTED, wraplength=px(720), justify="left").pack(anchor="w", pady=(px(8), 0))
         right = setting_row(rt, "Watched folders", None)
         Button(right, "Add folder", self.engine_add_folder, "secondary", icon="folder").pack(side="left")
@@ -1464,7 +1480,7 @@ class App(tk.Tk):
         head.pack(fill="x")
         label(head, ICONS["download"], "icon", ACCENT).pack(side="left")
         label(head, "Download protection", "h2").pack(side="left", padx=px(10))
-        label(dl, "Works with real-time monitoring. Each finished download is checked before you open it: PC Guard's "
+        label(dl, "Works with real-time monitoring. Each finished download is checked before you open it: Kavacham's "
                   "engine, the website it came from, and a Microsoft Defender scan for programs, scripts, archives "
                   "and macro documents. Files still downloading are left alone until complete.", "small", MUTED,
               wraplength=px(720), justify="left").pack(anchor="w", pady=(px(8), 0))
@@ -1498,46 +1514,6 @@ class App(tk.Tk):
               "small", MUTED).pack(side="left", padx=(px(10), 0))
         self.link_result = frame(lc)
         self.link_result.pack(fill="x", pady=(px(16), 0))
-
-        # -- AI analysis tab
-        tab = ScrollFrame(holder)
-        self.eng_frames["ai"] = tab
-        body = tab.inner
-        setup = Card(body, padding=22)
-        setup.pack(fill="x", padx=(0, px(4)))
-        head = frame(setup)
-        head.pack(fill="x")
-        label(head, ICONS["bolt"], "icon", ACCENT).pack(side="left")
-        label(head, "AI threat analysis", "h2").pack(side="left", padx=px(10))
-        self.ai_badge = badge(head, "OFF", "warn")
-        self.ai_badge.pack(side="left")
-        label(setup, "Claude explains in plain words why a file, link or message looks suspicious and what to do. It's "
-                     "an extra opinion: PC Guard's engine and Microsoft Defender still make every decision.",
-              "small", MUTED, wraplength=px(760), justify="left").pack(anchor="w", pady=(px(8), px(4)))
-        label(setup, "What's sent: file names, detection reasons and short text excerpts (never whole files); for "
-                     "messages, the text you paste. It goes to Anthropic's Claude API and costs a few cents per "
-                     "analysis on your API account.", "small", SUBTLE, wraplength=px(760),
-              justify="left").pack(anchor="w")
-        right = setting_row(setup, "Anthropic API key", "Stored encrypted with Windows; only your account can read it")
-        self.ai_key = tk.StringVar()
-        ttk.Entry(right, textvariable=self.ai_key, show="•", width=34, font=F["body"]).pack(side="left")
-        Button(right, "Save key", self.ai_save_key, "primary", icon="check").pack(side="left", padx=(px(8), 0))
-        Button(right, "Remove", lambda: self.ai_save_key(remove=True), "ghost").pack(side="left", padx=(px(6), 0))
-
-        msg = Card(body, padding=22)
-        msg.pack(fill="x", padx=(0, px(4)), pady=(px(16), 0))
-        label(msg, "Is this message a scam?", "h2").pack(anchor="w")
-        label(msg, "Paste an email, SMS or chat message. Links in it are checked against the threat lists, then Claude "
-                   "explains the warning signs.", "small", MUTED).pack(anchor="w", pady=(px(4), px(10)))
-        box = tk.Frame(msg, bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        box.pack(fill="x")
-        self.ai_msg = tk.Text(box, height=6, bd=0, bg=BG, fg=TEXT, font=F["body"], wrap="word", padx=px(12),
-                              pady=px(10), insertbackground=TEXT, highlightthickness=0, selectbackground=ACCENT_DIM)
-        self.ai_msg.pack(fill="x")
-        Button(msg, "Analyze with AI", self.ai_analyze_message, "primary", icon="search").pack(anchor="w",
-                                                                                            pady=(px(12), 0))
-        self.ai_msg_result = frame(msg)
-        self.ai_msg_result.pack(fill="x", pady=(px(14), 0))
         self.eng_tabs.select("scan")
         return p
 
@@ -1547,8 +1523,6 @@ class App(tk.Tk):
         self.eng_frames[key].pack(fill="both", expand=True)
         if key == "protect":
             self.refresh_engine()
-        elif key == "ai":
-            self._refresh_ai_badge()
 
     # ---- scanning
     def engine_scan(self, mode):
@@ -1634,10 +1608,10 @@ class App(tk.Tk):
     def engine_quarantine_selected(self):
         rows = [(i, r) for i, r in self._selected_results() if r.get("action") != "Quarantined"]
         if not rows:
-            messagebox.showinfo("PC Guard", "Select one or more files in the list first.")
+            messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
             return
         names = "\n".join(f"•  {r['name']}" for _i, r in rows[:12])
-        if not messagebox.askyesno("PC Guard", f"Move {len(rows)} file(s) to quarantine?\n\n{names}\n\n"
+        if not messagebox.askyesno("Kavacham", f"Move {len(rows)} file(s) to quarantine?\n\n{names}\n\n"
                                                "They can be restored from the Quarantine page."):
             return
         for _i, r in rows:
@@ -1648,9 +1622,9 @@ class App(tk.Tk):
     def engine_mark_safe(self):
         rows = self._selected_results()
         if not rows:
-            messagebox.showinfo("PC Guard", "Select one or more files in the list first.")
+            messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
             return
-        if not messagebox.askyesno("PC Guard", f"Trust {len(rows)} file(s)? They won't be flagged again unless "
+        if not messagebox.askyesno("Kavacham", f"Trust {len(rows)} file(s)? They won't be flagged again unless "
                                                "they change."):
             return
         for _i, r in rows:
@@ -1701,7 +1675,7 @@ class App(tk.Tk):
                 self.eng_update_btn.configure(state="normal")
                 self.refresh_engine()
                 if errors and not summary:
-                    messagebox.showwarning("PC Guard", "Could not reach the threat feeds:\n\n" + "\n".join(errors))
+                    messagebox.showwarning("Kavacham", "Could not reach the threat feeds:\n\n" + "\n".join(errors))
             self.ui(done)
         self.bg(work)
 
@@ -1712,7 +1686,7 @@ class App(tk.Tk):
         engine.save_abusech_key(key)
         self.settings = load_settings()
         self.abusech_key.set("")
-        messagebox.showinfo("PC Guard", "abuse.ch key saved. PC Guard will now download the latest signatures.")
+        messagebox.showinfo("Kavacham", "abuse.ch key saved. Kavacham will now download the latest signatures.")
         self.engine_update()
 
     def _save_engine_settings(self):
@@ -1727,7 +1701,7 @@ class App(tk.Tk):
         def work():
             err = engine.set_monitor(on)
             if err:
-                self.ui(messagebox.showwarning, "PC Guard", "Monitoring is running now, but it couldn't be set to "
+                self.ui(messagebox.showwarning, "Kavacham", "Monitoring is running now, but it couldn't be set to "
                                                             f"start at sign-in:\n\n{err}")
             time.sleep(2.5)
             self.refresh_engine()
@@ -1782,10 +1756,12 @@ class App(tk.Tk):
                 info += f"   ·   ends up at {page['final_url'][:90]}"
             label(self.link_result, info, "small", MUTED).pack(anchor="w")
         tk.Frame(self.link_result, bg=SURFACE, height=px(8)).pack()
-        for reason in r["reasons"] or ["No warning signs found"]:
-            label(self.link_result, f"•  {reason}", "body").pack(anchor="w", pady=px(1))
-        Button(self.link_result, "Explain with AI", self.ai_explain_link, "secondary", icon="search").pack(
-            anchor="w", pady=(px(12), 0))
+        if not r["reasons"]:
+            label(self.link_result, "•  No warning signs found", "body").pack(anchor="w", pady=px(1))
+        for reason, meaning in explain.explain(r["verdict"], r["reasons"])["items"]:
+            label(self.link_result, f"•  {reason}", "body").pack(anchor="w", pady=(px(4), 0))
+            label(self.link_result, meaning, "small", MUTED, wraplength=px(720), justify="left").pack(
+                anchor="w", padx=(px(16), 0))
         if r["verdict"] != "malicious":
             label(self.link_result, "Not being on a threat list doesn't prove a link is safe. If a message is "
                                     "unexpected or urgent, go to the site yourself instead of clicking.",
@@ -1793,7 +1769,7 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------- quarantine
     def _page_quarantine(self):
-        p = self.page("Quarantine", "Files PC Guard's engine has isolated. They're encoded so they can't run, and "
+        p = self.page("Quarantine", "Files Kavacham's engine has isolated. They're encoded so they can't run, and "
                                     "can be restored if they turn out to be safe.")
         banner = Card(p, padding=20)
         banner.pack(fill="x")
@@ -1828,25 +1804,25 @@ class App(tk.Tk):
     def quarantine_restore(self):
         sel = self.q_tree.selection()
         if not sel:
-            messagebox.showinfo("PC Guard", "Select a file in the list first.")
+            messagebox.showinfo("Kavacham", "Select a file in the list first.")
             return
-        if not messagebox.askyesno("PC Guard", f"Restore {len(sel)} file(s) to where they came from?\n\nOnly do this "
+        if not messagebox.askyesno("Kavacham", f"Restore {len(sel)} file(s) to where they came from?\n\nOnly do this "
                                                "if you're sure they're safe. They won't be flagged again."):
             return
         for qid in sel:
             try:
                 engine.restore(qid)
             except Exception as e:
-                messagebox.showerror("PC Guard", f"Could not restore: {e}")
+                messagebox.showerror("Kavacham", f"Could not restore: {e}")
         self.refresh_quarantine()
 
     def quarantine_delete(self, all_=False):
         sel = self.q_tree.get_children() if all_ else self.q_tree.selection()
         if not sel:
             if not all_:
-                messagebox.showinfo("PC Guard", "Select a file in the list first.")
+                messagebox.showinfo("Kavacham", "Select a file in the list first.")
             return
-        if not messagebox.askyesno("PC Guard", f"Permanently delete {len(sel)} quarantined file(s)?\n\n"
+        if not messagebox.askyesno("Kavacham", f"Permanently delete {len(sel)} quarantined file(s)?\n\n"
                                                "This can't be undone."):
             return
         for qid in sel:
@@ -1856,7 +1832,7 @@ class App(tk.Tk):
     # ---------------------------------------------------------- USB & phone
     def _page_usb(self):
         p = self.page("USB & phone", "Pendrives, USB disks and Android phones connected with a USB cable. They get "
-                                     "the same protection as this PC: engine, Defender, quarantine and AI.")
+                                     "the same protection as this PC: engine, Defender and quarantine.")
         self.usb_results, self.usb_busy, self._usb_cancel, self._usb_info = [], False, False, {}
         devices = Card(p, padding=18)
         devices.pack(fill="x")
@@ -1901,9 +1877,9 @@ class App(tk.Tk):
         acts = frame(res, padx=px(10), pady=px(10))
         acts.pack(fill="x")
         Button(acts, "Remove", self.usb_remove_selected, "danger", icon="stop").pack(side="left")
-        Button(acts, "Explain with AI", self.usb_explain_selected, "secondary", icon="search").pack(side="left",
-                                                                                                padx=px(8))
-        Button(acts, "Mark as safe", self.usb_mark_safe, "ghost", icon="check").pack(side="left")
+        Button(acts, "What does this mean?", self.usb_explain_selected, "secondary", icon="search").pack(
+            side="left", padx=(px(8), 0))
+        Button(acts, "Mark as safe", self.usb_mark_safe, "ghost", icon="check").pack(side="left", padx=px(8))
         label(acts, "Remove = quarantine (drives), delete (phone files) or uninstall (phone apps)", "small",
               SUBTLE).pack(side="right")
         stor.configure(pady=px(14))
@@ -1990,7 +1966,7 @@ class App(tk.Tk):
     def _ps_serial(self):
         serial = self._ps_serials.get(self.ps_vars["phone"].get())
         if not serial:
-            messagebox.showinfo("PC Guard", "Connect an Android phone with USB debugging switched on first.\n\n"
+            messagebox.showinfo("Kavacham", "Connect an Android phone with USB debugging switched on first.\n\n"
                                             "The Security scan tab shows how to switch it on.")
         return serial
 
@@ -2099,11 +2075,11 @@ class App(tk.Tk):
     def ps_move(self):
         rows = self._ps_selected()
         if not rows:
-            messagebox.showinfo("PC Guard", "Select one or more files in the list first.")
+            messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
             return
         name = re.sub(r'[\\/:*?"<>|]', "_", self.ps_vars["phone"].get() or "Phone")
         dest = os.path.join(os.path.expanduser("~"), "Pictures", "From phone", name)
-        if not messagebox.askyesno("PC Guard", f"Move {len(rows)} file(s) ({human(sum(s for _i, s, _p in rows))}) "
+        if not messagebox.askyesno("Kavacham", f"Move {len(rows)} file(s) ({human(sum(s for _i, s, _p in rows))}) "
                                                f"to this PC?\n\nThey'll be saved in:\n{dest}\n\nEach file is removed "
                                                "from the phone only after its copy on the PC is checked complete."):
             return
@@ -2113,11 +2089,11 @@ class App(tk.Tk):
     def ps_delete(self):
         rows = self._ps_selected()
         if not rows:
-            messagebox.showinfo("PC Guard", "Select one or more files in the list first.")
+            messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
             return
         names = "\n".join(f"•  {os.path.basename(p)}" for _i, _s, p in rows[:10])
         more = f"\n…and {len(rows) - 10} more" if len(rows) > 10 else ""
-        if not messagebox.askyesno("PC Guard", f"Permanently delete {len(rows)} file(s) "
+        if not messagebox.askyesno("Kavacham", f"Permanently delete {len(rows)} file(s) "
                                                f"({human(sum(s for _i, s, _p in rows))}) from the phone?\n\n{names}{more}"
                                                "\n\nThis can't be undone: they don't go to the phone's trash. "
                                                "Use 'Move to this PC' to keep a copy."):
@@ -2129,7 +2105,7 @@ class App(tk.Tk):
         write_json(SETTINGS_FILE, self.settings)
 
     def _usb_watch_tick(self):
-        """Plug-in watching while PC Guard is open; the background monitor does it when it's running."""
+        """Plug-in watching while Kavacham is open; the background monitor does it when it's running."""
         if not engine.monitor_running():
             try:
                 self.usb_watch.step(on_new=self._usb_plugged)
@@ -2143,7 +2119,7 @@ class App(tk.Tk):
     def _usb_plugged(self, root):
         self.refresh_usb()
         if self.settings["usb"]["auto_scan"] and not self.usb_busy:
-            self.bg(notify, "PC Guard: USB drive connected", f"Scanning {root[:2]} for threats…")
+            self.bg(notify, "Kavacham: USB drive connected", f"Scanning {root[:2]} for threats…")
             self.usb_scan_drive(root, auto=True)
 
     def refresh_usb(self):
@@ -2223,7 +2199,7 @@ class App(tk.Tk):
     # ---- running scans
     def _usb_run(self, title, fn):
         if self.usb_busy:
-            messagebox.showinfo("PC Guard", "A USB scan is already running.")
+            messagebox.showinfo("Kavacham", "A USB scan is already running.")
             return
         self.usb_busy, self._usb_cancel = True, False
         self.usb_status.configure(text=title, fg=TEXT)
@@ -2291,13 +2267,13 @@ class App(tk.Tk):
             hits, n, secs = usb.scan_drive(root, progress, cancelled, self.settings["engine"]["auto_quarantine"])
             if auto:
                 malware = sum(1 for h in hits if h["verdict"] == "Malware")
-                notify("PC Guard: USB scan finished", f"{root[:2]}: {len(hits)} finding(s), {malware} malware"
+                notify("Kavacham: USB scan finished", f"{root[:2]}: {len(hits)} finding(s), {malware} malware"
                        if hits else f"{root[:2]} is clean")
             return hits, f"{n:,} files on {root[:2]} in {int(secs)} s"
         self._usb_run(f"Scanning USB drive {root[:2]}", fn)
 
     def usb_repair(self, root):
-        if not messagebox.askyesno("PC Guard", f"Repair {root[:2]}?\n\nThis quarantines shortcut-virus files "
+        if not messagebox.askyesno("Kavacham", f"Repair {root[:2]}?\n\nThis quarantines shortcut-virus files "
                                                "(fake shortcuts, autorun.inf, hidden scripts) and makes your hidden "
                                                "files visible again. Your own files aren't deleted."):
             return
@@ -2323,8 +2299,8 @@ class App(tk.Tk):
         consented = self.settings["usb"].setdefault("deep_consent", [])
         if serial not in consented:
             if not messagebox.askyesno(
-                    "PC Guard: allow a deep scan of this phone?",
-                    "PC Guard will look through ALL of this phone's storage over USB debugging, including:\n\n"
+                    "Kavacham: allow a deep scan of this phone?",
+                    "Kavacham will look through ALL of this phone's storage over USB debugging, including:\n\n"
                     "•  hidden folders (names starting with a dot)\n"
                     "•  app folders (Android/data and Android/obb), which file managers can't show\n"
                     "•  SD cards\n\n"
@@ -2344,12 +2320,12 @@ class App(tk.Tk):
 
     def usb_setup_adb(self):
         if usb.adb_path():
-            messagebox.showinfo("PC Guard", "Android tools are ready.\n\nOn the phone: Settings → About phone → tap "
+            messagebox.showinfo("Kavacham", "Android tools are ready.\n\nOn the phone: Settings → About phone → tap "
                                             "Build number 7 times. Then Settings → System → Developer options → turn "
                                             "on USB debugging, and tap Allow when the phone asks.")
             self.refresh_usb()
             return
-        if not messagebox.askyesno("PC Guard", "Checking installed apps needs Google's free Android tools (adb, about "
+        if not messagebox.askyesno("Kavacham", "Checking installed apps needs Google's free Android tools (adb, about "
                                                "7 MB, downloaded from dl.google.com).\n\nDownload them now?"):
             return
 
@@ -2365,10 +2341,10 @@ class App(tk.Tk):
     def usb_remove_selected(self):
         rows = [(i, r) for i, r in self._usb_selected() if r.get("kind") != "advice" and not r.get("action")]
         if not rows:
-            messagebox.showinfo("PC Guard", "Select one or more flagged items in the list first.")
+            messagebox.showinfo("Kavacham", "Select one or more flagged items in the list first.")
             return
         names = "\n".join(f"•  {r['name']}  ({r.get('device', '')})" for _i, r in rows[:12])
-        if not messagebox.askyesno("PC Guard", f"Remove {len(rows)} item(s)?\n\n{names}\n\nDrive files go to "
+        if not messagebox.askyesno("Kavacham", f"Remove {len(rows)} item(s)?\n\n{names}\n\nDrive files go to "
                                                "Quarantine; phone files are deleted; phone apps are uninstalled."):
             return
 
@@ -2379,7 +2355,7 @@ class App(tk.Tk):
                     ok, _out = usb.uninstall_app(r["serial"], r["package"])
                     r["action"] = "Uninstalled" if ok else "Couldn't uninstall"
                     if not ok:
-                        self.ui(messagebox.showwarning, "PC Guard", f"{r['name']} couldn't be uninstalled.\n\nIf it's "
+                        self.ui(messagebox.showwarning, "Kavacham", f"{r['name']} couldn't be uninstalled.\n\nIf it's "
                                 "a device administrator, remove that first: Settings → Security → Device admin apps "
                                 "(or 'Device administrators'), switch it off, then try again.")
                 elif fix == "adb_delete":
@@ -2397,154 +2373,70 @@ class App(tk.Tk):
             self.ui(self._fill_usb)
         self.bg(work)
 
-    def usb_explain_selected(self):
-        rows = self._usb_selected()
-        if not rows:
-            messagebox.showinfo("PC Guard", "Select an item in the list first.")
-            return
-        r = rows[0][1]
-        if r.get("kind") == "advice" or not self._ai_ready():
-            return
-        if r.get("package"):
-            self._ai_dialog(f"AI analysis: {r['name']}", "app", lambda: ai.app_evidence(r), r["verdict"])
-        else:
-            self._ai_dialog(f"AI analysis: {r['name']}", "file", lambda: ai.file_evidence(r), r["verdict"])
-
     def usb_mark_safe(self):
         rows = [(i, r) for i, r in self._usb_selected() if r.get("sha256")]
         if not rows:
-            messagebox.showinfo("PC Guard", "Select a flagged file or app in the list first.")
+            messagebox.showinfo("Kavacham", "Select a flagged file or app in the list first.")
             return
         for _i, r in rows:
             engine.ignore(r["sha256"], r.get("phone_path") or r["path"])
             r["action"] = "Marked safe"
         self._fill_usb()
 
-    # ---------------------------------------------------------- AI analysis
-    def _refresh_ai_badge(self):
-        on = ai.available()
-        text, tone = ("ON", "ok") if on else ("OFF", "warn")
-        fg, bgc = TONES[tone]
-        self.ai_badge.configure(text=f" {text} ", fg=fg, bg=bgc)
-
-    def ai_save_key(self, remove=False):
-        key = "" if remove else self.ai_key.get().strip()
-        if not remove and not key.startswith("sk-ant-"):
-            messagebox.showwarning("PC Guard", "That doesn't look like an Anthropic API key (they start with sk-ant-).\n\n"
-                                               "Create one at console.anthropic.com → API keys.")
-            return
-        ai.save_key(key)
-        self.settings = load_settings()
-        self.ai_key.set("")
-        self._refresh_ai_badge()
-        if not remove:
-            messagebox.showinfo("PC Guard", "API key saved. AI analysis is on.")
-
-    def _ai_ready(self):
-        if ai.available():
-            return True
-        if messagebox.askyesno("PC Guard", "AI analysis isn't set up yet. It needs an Anthropic API key.\n\n"
-                                           "Open the AI analysis settings now?"):
-            self.show("engine")
-            self.eng_tabs.select("ai")
-        return False
-
-    def ai_explain_selected(self):
+    # ---------------------------------------------------------- plain-language explanations
+    def engine_explain_selected(self):
         rows = self._selected_results()
         if not rows:
-            messagebox.showinfo("PC Guard", "Select a file in the list first.")
+            messagebox.showinfo("Kavacham", "Select a file in the list first.")
             return
-        if self._ai_ready():
-            r = rows[0][1]
-            self._ai_dialog(f"AI analysis: {r['name']}", "file", lambda: ai.file_evidence(r), r["verdict"])
+        self._explain_dialog(rows[0][1])
 
-    def ai_explain_link(self):
-        r = getattr(self, "_last_link", None)
-        if r and self._ai_ready():
-            verdict = {"malicious": "Dangerous", "suspicious": "Suspicious"}.get(r["verdict"], "No known threats")
-            self._ai_dialog("AI analysis: link", "link", lambda: ai.link_evidence(r), verdict)
-
-    def ai_analyze_message(self):
-        text = self.ai_msg.get("1.0", "end").strip()
-        if not text or not self._ai_ready():
+    def usb_explain_selected(self):
+        rows = self._usb_selected()
+        if not rows:
+            messagebox.showinfo("Kavacham", "Select an item in the list first.")
             return
-        for w in self.ai_msg_result.winfo_children():
-            w.destroy()
-        label(self.ai_msg_result, "Analyzing…", "body", MUTED).pack(anchor="w")
+        self._explain_dialog(rows[0][1])
 
-        def work():
-            try:
-                data = ai.analyze("message", ai.message_evidence(text))
-                self.ui(self._render_ai, self.ai_msg_result, data, None)
-            except ai.AIError as e:
-                self.ui(self._render_ai_error, self.ai_msg_result, str(e))
-        self.bg(work)
-
-    def _ai_dialog(self, title, kind, evidence, engine_verdict):
+    def _explain_dialog(self, r):
+        data = explain.explain(r["verdict"], r["reasons"])
         win = tk.Toplevel(self, bg=SURFACE, padx=px(26), pady=px(22))
-        win.title(title)
-        win.geometry(f"{px(640)}x{px(520)}")
+        win.title(f"What does this mean? {r['name']}")
+        win.geometry(f"{px(640)}x{px(540)}")
         win.transient(self)
         dark_titlebar(win)
-        label(win, title, "h2").pack(anchor="w")
-        holder = frame(win, bg=SURFACE)
-        holder.pack(fill="both", expand=True, pady=(px(12), 0))
-        label(holder, "Asking Claude…", "body", MUTED).pack(anchor="w")
-
-        def work():
-            try:
-                data = ai.analyze(kind, evidence())
-                self.ui(self._render_ai, holder, data, engine_verdict)
-            except ai.AIError as e:
-                self.ui(self._render_ai_error, holder, str(e))
-            except Exception as e:  # never let an AI hiccup take the app down
-                self.ui(self._render_ai_error, holder, f"Unexpected error: {e}")
-        self.bg(work)
-
-    def _render_ai_error(self, parent, text):
-        if not parent.winfo_exists():
-            return
-        for w in parent.winfo_children():
-            w.destroy()
-        label(parent, f"{ICONS['warning']}", "icon", WARN).pack(anchor="w")
-        label(parent, text, "body", TEXT, wraplength=px(560), justify="left").pack(anchor="w")
-
-    def _render_ai(self, parent, data, engine_verdict):
-        if not parent.winfo_exists():
-            return
-        for w in parent.winfo_children():
-            w.destroy()
-        bg = parent["bg"]
-        tone, title = {"likely_malicious": ("bad", "Likely malicious"), "phishing_or_scam": ("bad", "Phishing or scam"),
-                       "suspicious": ("warn", "Suspicious"), "unclear": ("info", "Unclear"),
-                       "likely_safe": ("ok", "Likely safe")}[data["verdict"]]
-        row = frame(parent, bg=bg)
-        row.pack(anchor="w")
-        label(row, title, "h2", TONES[tone][0]).pack(side="left")
-        label(row, f"   {data['confidence']} confidence", "small", MUTED).pack(side="left")
-        wrap = px(560)
-        label(parent, data["summary"], "body", TEXT, wraplength=wrap, justify="left").pack(anchor="w",
-                                                                                                pady=(px(8), px(10)))
-        for heading, items in (("WHY", data["reasons"]), ("WHAT TO DO", data["what_to_do"])):
-            if items:
-                label(parent, heading, "caption", SUBTLE).pack(anchor="w", pady=(px(6), px(2)))
-                for item in items:
-                    label(parent, f"•  {item}", "body", TEXT, wraplength=wrap, justify="left").pack(anchor="w")
-        foot = f"AI opinion from {data.get('model', ai.MODEL)} — an extra layer, not a detection."
-        if engine_verdict:
-            foot += f" PC Guard's verdict stays: {engine_verdict}."
-        label(parent, foot, "small", SUBTLE, wraplength=wrap, justify="left").pack(anchor="w",
-                                                                                        pady=(px(14), 0))
+        wrap = px(570)
+        label(win, r["name"], "small", MUTED, wraplength=wrap, justify="left").pack(anchor="w")
+        label(win, data["title"], "h2", TONES[data["tone"]][0]).pack(anchor="w", pady=(px(2), 0))
+        label(win, data["summary"], "body", TEXT, wraplength=wrap, justify="left").pack(
+            anchor="w", pady=(px(6), px(8)))
+        Button(win, "Close", win.destroy, "secondary").pack(side="bottom", anchor="e", pady=(px(12), 0))
+        body = ScrollFrame(win)
+        body.pack(fill="both", expand=True)
+        inner = body.inner
+        label(inner, "WHY IT WAS FLAGGED", "caption", SUBTLE).pack(anchor="w", pady=(px(6), px(2)))
+        for reason, meaning in data["items"]:
+            label(inner, f"•  {reason}", "body", TEXT, wraplength=wrap, justify="left").pack(anchor="w",
+                                                                                         pady=(px(6), 0))
+            label(inner, meaning, "small", MUTED, wraplength=wrap - px(16), justify="left").pack(
+                anchor="w", padx=(px(16), 0))
+        if data["what_to_do"]:
+            label(inner, "WHAT TO DO", "caption", SUBTLE).pack(anchor="w", pady=(px(16), px(2)))
+            for step in data["what_to_do"]:
+                label(inner, f"•  {step}", "body", TEXT, wraplength=wrap, justify="left").pack(anchor="w",
+                                                                                           pady=px(2))
+        label(inner, "Explained by Kavacham on this PC. Nothing was sent anywhere.", "small", SUBTLE,
+              wraplength=wrap, justify="left").pack(anchor="w", pady=(px(16), 0))
 
     # ---------------------------------------------------------- security activity
     def _page_events(self):
         p = self.page("Security activity", "Protection status, alerts, and every scan, detection and change — "
-                                           "PC Guard's and Windows Defender's — newest first.")
+                                           "Kavacham's and Windows Defender's — newest first.")
         tiles = frame(p)
         tiles.pack(fill="x")
         self.act_tiles = {}
         for i, (key, title) in enumerate([("rtp", "DEFENDER REAL-TIME"), ("fw", "WINDOWS FIREWALL"),
-                                          ("sigs", "ENGINE SIGNATURES"), ("mon", "PC GUARD MONITOR")]):
+                                          ("sigs", "ENGINE SIGNATURES"), ("mon", "KAVACHAM MONITOR")]):
             tiles.columnconfigure(i, weight=1, uniform="tile")
             card = Card(tiles, padding=16)
             card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else px(6), 0 if i == 3 else px(6)))
@@ -2565,7 +2457,6 @@ class App(tk.Tk):
         self.ev_tabs = Segmented(bar, [("all", "All"), ("detection", "Detections"), ("scan", "Scans"),
                                        ("quarantine", "Quarantine"), ("protection", "Protection"),
                                        ("system", "Windows Defender"), ("usb", "USB"), ("url", "Links"),
-                                       ("ai", "AI"),
                                        ("update", "Updates")], self._filter_events)
         self.ev_tabs.pack(side="left")
         Button(bar, "Refresh", self.refresh_events, "secondary", icon="refresh").pack(side="right")
@@ -2600,7 +2491,7 @@ class App(tk.Tk):
     def _fill_events(self):
         self.ev_tree.delete(*self.ev_tree.get_children())
         cats = {"protection": ("protection", "alert", "engine", "monitor")}.get(self.ev_filter, (self.ev_filter,))
-        names = {"url": "Link", "ai": "AI", "system": "Windows Defender", "usb": "USB"}
+        names = {"url": "Link", "system": "Windows Defender", "usb": "USB"}
         events = sorted(engine.read_events() + self._sys_events, key=lambda e: e["time"], reverse=True)
         for e in events[:1500]:
             if self.ev_filter == "all" or e["category"] in cats:
@@ -2853,7 +2744,7 @@ class App(tk.Tk):
             return
         total = sum(self._clean_sizes[n][0] for n in chosen)
         names = "\n".join(f"•  {n}  ({human(self._clean_sizes[n][0])})" for n in chosen)
-        if not messagebox.askyesno("PC Guard", f"Permanently delete {human(total)} of junk files?\n\n{names}\n\n"
+        if not messagebox.askyesno("Kavacham", f"Permanently delete {human(total)} of junk files?\n\n{names}\n\n"
                                                "Tip: close your browsers first so their caches can be cleared."):
             return
         self._busy_clean(True, funnel=True)
@@ -2956,7 +2847,7 @@ class App(tk.Tk):
     def find_large(self):
         root = self.large_path.get()
         if not os.path.isdir(root):
-            messagebox.showerror("PC Guard", "That folder does not exist.")
+            messagebox.showerror("Kavacham", "That folder does not exist.")
             return
         self.large_btn.configure(state="disabled")
         self.large_tree.delete(*self.large_tree.get_children())
@@ -3011,7 +2902,7 @@ class App(tk.Tk):
         paths = self._selected_paths()
         if not paths:
             return
-        if not messagebox.askyesno("PC Guard", f"Move {len(paths)} file(s) to the Recycle Bin?\n"
+        if not messagebox.askyesno("Kavacham", f"Move {len(paths)} file(s) to the Recycle Bin?\n"
                                                "You can restore them from the Recycle Bin later."):
             return
         for item in list(self.large_tree.selection()):
@@ -3076,7 +2967,7 @@ class App(tk.Tk):
     def find_dups(self):
         root = self.dup_path.get()
         if not os.path.isdir(root):
-            messagebox.showerror("PC Guard", "That folder does not exist.")
+            messagebox.showerror("Kavacham", "That folder does not exist.")
             return
         self._dup_cancel = False
         self._dup_root = root
@@ -3164,7 +3055,7 @@ class App(tk.Tk):
         tree = self.dup_tree
         chosen = [i for i in tree.selection() if i in self.dup_meta]
         if not chosen:
-            messagebox.showinfo("PC Guard", "Select the copies to remove first, or click 'Select extra copies'.")
+            messagebox.showinfo("Kavacham", "Select the copies to remove first, or click 'Select extra copies'.")
             return
         by_group = {}
         for i in chosen:
@@ -3172,12 +3063,12 @@ class App(tk.Tk):
         for g, items in by_group.items():
             kept = [i for i in tree.get_children(g) if i not in items]
             if not any(os.path.exists(self.dup_meta[i][1]) for i in kept):
-                messagebox.showerror("PC Guard", "You selected every copy of a file.\n\n"
+                messagebox.showerror("Kavacham", "You selected every copy of a file.\n\n"
                                                  "Leave at least one copy unselected in each set.")
                 tree.see(items[0])
                 return
         total = sum(self.dup_meta[i][0] for i in chosen)
-        if not messagebox.askyesno("PC Guard", f"Move {len(chosen)} duplicate file(s) ({human(total)}) to the "
+        if not messagebox.askyesno("Kavacham", f"Move {len(chosen)} duplicate file(s) ({human(total)}) to the "
                                                "Recycle Bin?\n\nAt least one copy of each file is kept, and you "
                                                "can restore these from the Recycle Bin."):
             return
@@ -3205,7 +3096,7 @@ class App(tk.Tk):
     # ---------------------------------------------------------- automation
     def _page_schedule(self):
         p = self.page("Automation", "Scan and clean on a schedule. Tasks run through Windows Task Scheduler, "
-                                    "even when PC Guard is closed.")
+                                    "even when Kavacham is closed.")
         self.sched, self.sched_frames = {}, {}
         holder = frame(p)
         self.sched_tabs = Segmented(p, [("scan", "Automatic scan"), ("clean", "Automatic cleaning"),
@@ -3299,12 +3190,12 @@ class App(tk.Tk):
             right = setting_row(what, "Update virus definitions first", "Gets the latest signatures before scanning")
             v["update_first"] = tk.BooleanVar(value=cfg["update_first"])
             track(Toggle(right, v["update_first"])).pack()
-            right = setting_row(what, "Also scan with the PC Guard engine",
+            right = setting_row(what, "Also scan with the Kavacham engine",
                                 "A second opinion after Defender; known malware is quarantined")
             v["engine"] = tk.BooleanVar(value=cfg["engine"])
             track(Toggle(right, v["engine"])).pack()
         else:
-            setting_row(what, "What to clean", "Items marked * need PC Guard to be saved while running as admin",
+            setting_row(what, "What to clean", "Items marked * need Kavacham to be saved while running as admin",
                         first=True)
             grid = frame(what)
             grid.pack(fill="x", pady=(0, px(12)))
@@ -3379,10 +3270,10 @@ class App(tk.Tk):
     def save_schedule(self, kind):
         cfg = self._collect(kind)
         if cfg["enabled"] and cfg["frequency"] == "Weekly" and not cfg["days"]:
-            messagebox.showerror("PC Guard", "Pick at least one day of the week.")
+            messagebox.showerror("Kavacham", "Pick at least one day of the week.")
             return
         if kind == "clean" and cfg["enabled"] and not cfg["categories"]:
-            messagebox.showerror("PC Guard", "Pick at least one thing to clean.")
+            messagebox.showerror("Kavacham", "Pick at least one thing to clean.")
             return
         self.settings[kind] = cfg
         write_json(SETTINGS_FILE, self.settings)
@@ -3397,7 +3288,7 @@ class App(tk.Tk):
             self.ui(self._load_task_info, kind)
             admin_cats = [n for n, _p, a in CLEAN_TARGETS if a and n in cfg.get("categories", [])]
             if cfg["enabled"] and admin_cats and not is_admin():
-                self.ui(messagebox.showinfo, "PC Guard",
+                self.ui(messagebox.showinfo, "Kavacham",
                         "Saved. These items need administrator rights and will be skipped:\n\n"
                         + "\n".join("•  " + n for n in admin_cats)
                         + "\n\nTo include them, click 'Restart as admin' and save the schedule again.")
@@ -3456,7 +3347,7 @@ class App(tk.Tk):
         set_empty(self.report_tree, "No activity yet. Scans and cleanups will be listed here.")
 
     def clear_reports(self):
-        if messagebox.askyesno("PC Guard", "Clear all report history?"):
+        if messagebox.askyesno("Kavacham", "Clear all report history?"):
             write_json(HISTORY_FILE, [])
             self.refresh_reports()
 

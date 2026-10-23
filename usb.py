@@ -1,4 +1,4 @@
-"""PC Guard USB protection: pendrives, USB disks and Android phones plugged into this PC.
+"""Kavacham USB protection: pendrives, USB disks and Android phones plugged into this PC.
 
 Drives get the engine scan, a Defender scan and USB-specific checks (autorun tricks, the "shortcut virus" that hides
 your folders behind fake shortcuts). Phones are checked two ways:
@@ -668,16 +668,16 @@ class Watcher:
 
 
 def auto_scan(root):
-    notify("PC Guard: USB drive connected", f"Scanning {root[:2]} {_volume_label(root)} for threats…")
+    notify("Kavacham: USB drive connected", f"Scanning {root[:2]} {_volume_label(root)} for threats…")
     hits, n, _secs = scan_drive(root)
     malware = sum(1 for h in hits if h["verdict"] == "Malware")
     shortcut = any("Shortcut virus" in r for h in hits for r in h["reasons"])
     if hits:
-        notify("PC Guard: USB drive needs attention",
+        notify("Kavacham: USB drive needs attention",
                f"{root[:2]}: {malware} malware (quarantined), {len(hits) - malware} other finding(s)"
-               + (". Shortcut virus found - use Repair in PC Guard." if shortcut else ". Open PC Guard → USB & phone."))
+               + (". Shortcut virus found - use Repair in Kavacham." if shortcut else ". Open Kavacham → USB & phone."))
     else:
-        notify("PC Guard: USB drive is clean", f"{root[:2]}: {n:,} files checked, nothing found.")
+        notify("Kavacham: USB drive is clean", f"{root[:2]}: {n:,} files checked, nothing found.")
     return hits
 
 

@@ -1,4 +1,4 @@
-"""PC Guard core: Defender scanning, junk cleaning, Task Scheduler integration and the headless task runner."""
+"""Kavacham core: Defender scanning, junk cleaning, Task Scheduler integration and the headless task runner."""
 import base64
 import ctypes
 import glob
@@ -327,10 +327,9 @@ DEFAULT_SETTINGS = {
               "categories": ["User temporary files", "Crash dumps & error reports", "Thumbnail cache"],
               "min_free_gb": 0, "run_missed": True, "skip_on_battery": True, "idle": True, "notify": True},
     "engine": {"realtime": False, "auto_update": True, "auto_quarantine": True, "download_protection": True,
-               "hold_downloads": True, "abusech_key": "",  # DPAPI-encrypted, like the AI key
+               "hold_downloads": True, "abusech_key": "",  # DPAPI-encrypted: only this Windows account can read it
                "folders": [os.path.join(os.path.expanduser("~"), "Downloads"),
                            os.path.join(os.path.expanduser("~"), "Desktop")]},
-    "ai": {"enabled": False, "key": ""},  # key is DPAPI-encrypted: only this Windows account can read it
     "alerts": {"enabled": True},
     "usb": {"auto_scan": True, "deep_consent": [],
             "storage": {"scope": "Whole phone", "large": "100 MB", "dup": "1 MB", "hidden": False,
@@ -413,7 +412,7 @@ $a = New-ScheduledTaskAction -Execute {ps_quote(pythonw())} -Argument {ps_quote(
 $t = {trigger}
 $s = New-ScheduledTaskSettingsSet -StartWhenAvailable:${str(cfg['run_missed']).lower()} -AllowStartIfOnBatteries:{battery} -DontStopIfGoingOnBatteries:{battery} -ExecutionTimeLimit (New-TimeSpan -Hours 6) -MultipleInstances IgnoreNew {idle}
 $p = New-ScheduledTaskPrincipal -UserId {user} -LogonType Interactive -RunLevel {level}
-Register-ScheduledTask -TaskName {name} -Action $a -Trigger $t -Settings $s -Principal $p -Description 'Created by PC Guard' -Force | Out-Null
+Register-ScheduledTask -TaskName {name} -Action $a -Trigger $t -Settings $s -Principal $p -Description 'Created by Kavacham' -Force | Out-Null
 """
     out = run_ps(script)
     if out.returncode != 0:
@@ -464,20 +463,20 @@ def scheduled_scan(cfg):
     if rc == 0:
         add_history("Scheduled scan", "No threats found", details, "ok")
         if cfg["notify"]:
-            notify("PC Guard: scan complete", f"No threats found. {details}")
+            notify("Kavacham: scan complete", f"No threats found. {details}")
     elif rc == 2:
         add_history("Scheduled scan", "Threats found and quarantined", details, "bad")
-        notify("PC Guard: threats found", "Threats were found and quarantined. Open PC Guard → Threat History.")
+        notify("Kavacham: threats found", "Threats were found and quarantined. Open Kavacham → Threat History.")
     else:
         add_history("Scheduled scan", "Scan error", f"{details} · Defender exit code {rc}", "warn")
         if cfg["notify"]:
-            notify("PC Guard: scan problem", f"The scheduled scan ended with error code {rc}.")
+            notify("Kavacham: scan problem", f"The scheduled scan ended with error code {rc}.")
     if cfg.get("engine", True):
         scheduled_engine_scan(cfg)
 
 
 def scheduled_engine_scan(cfg):
-    """Second opinion from PC Guard's own engine, after Defender. Known malware is quarantined automatically."""
+    """Second opinion from Kavacham's own engine, after Defender. Known malware is quarantined automatically."""
     import engine
     if load_settings()["engine"]["auto_update"] and engine.needs_update():
         try:
@@ -488,10 +487,10 @@ def scheduled_engine_scan(cfg):
     hits, n, secs = engine.scan_and_act(roots, f"Scheduled {cfg['type'].lower()} engine scan",
                                         load_settings()["engine"]["auto_quarantine"])
     malware = sum(1 for h in hits if h["signature"])
-    details = f"PC Guard engine · {n:,} files · {fmt_duration(secs)}"
+    details = f"Kavacham engine · {n:,} files · {fmt_duration(secs)}"
     if hits:
         add_history("Scheduled engine scan", f"{malware} malware, {len(hits) - malware} suspicious", details, "bad")
-        notify("PC Guard: engine scan found something", f"{len(hits)} file(s) need a look. Open PC Guard → Engine scan.")
+        notify("Kavacham: engine scan found something", f"{len(hits)} file(s) need a look. Open Kavacham → Engine scan.")
     else:
         add_history("Scheduled engine scan", "No threats found", details, "ok")
 
@@ -511,7 +510,7 @@ def scheduled_clean(cfg):
         details += f" · needs admin: {', '.join(needs_admin)}"
     add_history("Scheduled cleaning", f"Freed {human(freed)}", details, "warn" if needs_admin else "ok")
     if cfg["notify"]:
-        notify("PC Guard: cleaning complete", f"Freed {human(freed)} of junk files.")
+        notify("Kavacham: cleaning complete", f"Freed {human(freed)} of junk files.")
 
 
 def run_task(kind):
@@ -533,7 +532,7 @@ def run_task(kind):
         scheduled_scan(cfg) if kind == "scan" else scheduled_clean(cfg)
     except Exception as e:
         add_history(label, "Failed", str(e)[:200], "bad")
-        notify("PC Guard", f"{label} failed: {e}")
+        notify("Kavacham", f"{label} failed: {e}")
     finally:
         try:
             os.remove(lock)

@@ -1,4 +1,4 @@
-"""PC Guard - virus scanning (Microsoft Defender plus its own engine) and storage cleaning for Windows.
+"""Kavacham - virus scanning (Microsoft Defender plus its own engine) and storage cleaning for Windows.
 
 Run without arguments for the app; `--task scan` / `--task clean` / `--task monitor` is what Task Scheduler runs.
 """

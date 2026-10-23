@@ -1,4 +1,4 @@
-"""PC Guard smart alerts and security activity.
+"""Kavacham smart alerts and security activity.
 
 - Protection status: Defender real-time protection and signatures, Windows Firewall, the engine and its monitor
 - Smart alerts for disabled protection, outdated signatures, failed scans and unresolved threats, with toast
@@ -70,17 +70,17 @@ def check_alerts(st):
         out.append(("active_threats", "bad", f"{st['ActiveThreats']} threat(s) need attention",
                     "Defender found threats that haven't been removed yet.", "threats"))
     if st["realtime"] and not st["monitor"]:
-        out.append(("monitor_down", "bad", "PC Guard real-time monitoring has stopped",
-                    "It's switched on but not running. PC Guard will restart it.", "engine"))
+        out.append(("monitor_down", "bad", "Kavacham real-time monitoring has stopped",
+                    "It's switched on but not running. Kavacham will restart it.", "engine"))
     if st.get("SigAge", 0) > 3:
         out.append(("defender_sigs", "warn", f"Defender virus definitions are {st['SigAge']} days old",
                     "Update them so new threats are recognised.", "update_defender"))
     age = time.time() - st["engine_updated"] if st["engine_updated"] else None
     if age is None:
-        out.append(("engine_sigs", "warn", "PC Guard engine has no signatures yet",
+        out.append(("engine_sigs", "warn", "Kavacham engine has no signatures yet",
                     "Download the threat feeds (about 45 MB, once).", "engine"))
     elif age > 2 * 86400:
-        out.append(("engine_sigs", "warn", f"PC Guard engine signatures are {int(age // 86400)} days old",
+        out.append(("engine_sigs", "warn", f"Kavacham engine signatures are {int(age // 86400)} days old",
                     "Update the threat feeds.", "engine"))
     week = time.time() - 7 * 86400
     for h in read_json(HISTORY_FILE, [])[:50]:
@@ -113,7 +113,7 @@ def record_changes(st, state):
                              f"Windows Firewall off for {', '.join(off)}" if off else "Windows Firewall back on")
         if prev.get("monitor") is not None and snap["monitor"] is not None and prev["monitor"] != snap["monitor"]:
             engine.log_event("protection", "ok" if snap["monitor"] else "bad",
-                             "PC Guard monitoring " + ("running again" if snap["monitor"] else "stopped unexpectedly"))
+                             "Kavacham monitoring " + ("running again" if snap["monitor"] else "stopped unexpectedly"))
     state["snapshot"] = snap
 
 
@@ -132,13 +132,13 @@ def run_checks(send=True):
     if send and load_settings()["alerts"]["enabled"]:
         for a in alerts:
             if now - notified.get(a["id"], 0) > RENOTIFY:
-                notify(f"PC Guard: {a['title']}", a["detail"])
+                notify(f"Kavacham: {a['title']}", a["detail"])
                 engine.log_event("alert", a["level"], a["title"], a["detail"])
                 notified[a["id"]] = now
     state["notified"] = notified
     write_json(STATE_FILE, state)
     if st["realtime"] and not st["monitor"]:
-        engine.start_monitor()  # self-heal: the alert above says PC Guard restarts it
+        engine.start_monitor()  # self-heal: the alert above says Kavacham restarts it
     return st, alerts
 
 
