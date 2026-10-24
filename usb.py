@@ -31,6 +31,13 @@ PHONE_EXT = {".apk", ".xapk", ".apks", ".exe", ".scr", ".bat", ".cmd", ".vbs", "
 # where downloaded and shared files land on Android (paths inside a storage, lower case)
 PHONE_FOCUS = ["download", "documents", "bluetooth", "whatsapp", "telegram", "android/media/com.whatsapp",
                "android/media/org.telegram.messenger", "android/media/com.whatsapp.w4b", "shareit", "xender"]
+# media-only folders inside those: photos, videos and voice notes can't be risky types, and walking them over MTP
+# is what makes a phone scan crawl
+PHONE_SKIP = ["whatsapp images", "whatsapp video", "whatsapp audio", "whatsapp voice notes", "whatsapp stickers",
+              "whatsapp animated gifs", "whatsapp video notes", "whatsapp profile photos", "whatsapp business images",
+              "whatsapp business video", "whatsapp business audio", "whatsapp business voice notes", ".statuses",
+              ".thumbs", ".shared", ".trash", "telegram images", "telegram video", "telegram audio", "databases",
+              "backups"]
 STORES = {"com.android.vending", "com.sec.android.app.samsungapps", "com.huawei.appmarket", "com.xiaomi.market",
           "com.xiaomi.mipicks", "com.oppo.market", "com.heytap.market", "com.vivo.appstore", "com.amazon.venezia",
           "com.google.android.packageinstaller.store"}
@@ -233,10 +240,16 @@ _PS_FIND = r"""
 $ErrorActionPreference = 'SilentlyContinue'
 $sh = New-Object -ComObject Shell.Application
 $dev = @($sh.Namespace(17).Items() | ? { $_.IsFolder -and -not $_.IsFileSystem -and $_.Name -eq $env:PCG_DEVICE })[0]
+# Shell item names follow Explorer's "hide extensions" setting, so 'game.apk' can show up as just 'game'.
+# The real file name (with its extension) comes from the System.FileName property.
+function Real-Name($it) {
+  $n = [string]$it.ExtendedProperty('System.FileName')
+  if ($n) { $n } else { [string]$it.Name }
+}
 function Find-Item($path) {
   $cur = $dev
   foreach ($seg in ($path -split '/')) {
-    $cur = @($cur.GetFolder.Items() | ? { $_.Name -eq $seg })[0]
+    $cur = @($cur.GetFolder.Items() | ? { (Real-Name $_) -eq $seg -or $_.Name -eq $seg })[0]
     if (-not $cur) { return $null }
   }
   return $cur
@@ -260,14 +273,17 @@ def phone_files(device):
     script = _PS_FIND + r"""
 $exts = $env:PCG_EXTS -split ','
 $focus = $env:PCG_FOCUS -split '\|'
+$skip = $env:PCG_SKIP -split '\|'
 $found = New-Object System.Collections.ArrayList
 function Walk($item, $rel, $prefix) {
   foreach ($it in $item.GetFolder.Items()) {
-    $p = if ($rel) { "$rel/$($it.Name)" } else { $it.Name }
+    $name = Real-Name $it
+    $p = if ($rel) { "$rel/$name" } else { $name }
     $low = $p.ToLower()
     if ($it.IsFolder) {
+      if ($skip -contains $name.ToLower()) { continue }
       if (@($focus | ? { $low.StartsWith($_) -or $_.StartsWith($low + '/') }).Count) { Walk $it $p $prefix }
-    } elseif ($exts -contains [IO.Path]::GetExtension($it.Name).ToLower()) {
+    } elseif ($exts -contains [IO.Path]::GetExtension($name).ToLower()) {
       [void]$found.Add([pscustomobject]@{Path="$prefix/$p"; Size=[int64]$it.Size})
     }
   }
@@ -275,7 +291,8 @@ function Walk($item, $rel, $prefix) {
 if ($dev) { foreach ($store in $dev.GetFolder.Items()) { if ($store.IsFolder) { Walk $store '' $store.Name } } }
 ConvertTo-Json -InputObject @($found) -Compress
 """
-    env = {**os.environ, "PCG_DEVICE": device, "PCG_EXTS": ",".join(sorted(PHONE_EXT)), "PCG_FOCUS": "|".join(PHONE_FOCUS)}
+    env = {**os.environ, "PCG_DEVICE": device, "PCG_EXTS": ",".join(sorted(PHONE_EXT)), "PCG_FOCUS": "|".join(PHONE_FOCUS),
+           "PCG_SKIP": "|".join(PHONE_SKIP)}
     out = run_ps(script, env=env, timeout=900)
     return json.loads(out.stdout or "[]") or []
 
@@ -296,17 +313,18 @@ foreach ($p in $paths) {
   $dir = Join-Path $env:PCG_DEST $i
   New-Item -ItemType Directory -Force $dir | Out-Null
   $sh.Namespace($dir).CopyHere($it, 0x614)
-  $target = Join-Path $dir $it.Name
+  $target = $null
   $t0 = Get-Date; $last = -1
   while (((Get-Date) - $t0).TotalSeconds -lt 180) {
     Start-Sleep -Milliseconds 400
-    if (Test-Path -LiteralPath $target) {
-      $len = (Get-Item -LiteralPath $target).Length
-      if ($len -gt 0 -and $len -eq $last) { break }
-      $last = $len
+    $f = @(Get-ChildItem -LiteralPath $dir -File)[0]  # each file gets its own folder, so the only file is ours
+    if ($f) {
+      $target = $f.FullName
+      if ($f.Length -gt 0 -and $f.Length -eq $last) { break }
+      $last = $f.Length
     }
   }
-  if (Test-Path -LiteralPath $target) { $map[$target] = $p }
+  if ($target) { $map[$target] = $p }
 }
 $map | ConvertTo-Json -Compress
 """
@@ -338,7 +356,7 @@ def scan_phone_files(device, progress=lambda *a: None, cancelled=lambda: False):
     if cancelled() or not items:
         engine.log_event("usb", "ok", f"Phone files scan finished: {device}", f"{len(items)} risky-type files")
         return [], len(items)
-    hits = []
+    hits, copied = [], {}
     staging = tempfile.mkdtemp(prefix="pcguard-phone-")
     try:
         for start in range(0, len(items), 25):
@@ -347,6 +365,7 @@ def scan_phone_files(device, progress=lambda *a: None, cancelled=lambda: False):
             batch = items[start:start + 25]
             progress(start, f"Copying files from the phone ({start + len(batch)}/{len(items)})…", len(hits))
             mapping = copy_from_phone(device, [i["Path"] for i in batch], staging)
+            copied.update({os.path.normcase(k): v for k, v in mapping.items()})
             with engine.db() as con:
                 for local, phone_path in mapping.items():
                     found = engine.scan_file(con, local)  # includes the APK permission checks
@@ -355,8 +374,17 @@ def scan_phone_files(device, progress=lambda *a: None, cancelled=lambda: False):
                                  name=os.path.basename(phone_path) if "›" not in r["name"] else r["name"])
                         hits.append(r)
         for threat, local in defender_scan(staging) or []:
-            hits.append(_result(local, os.path.basename(local), "Malware", 100, [f"Microsoft Defender: {threat}"],
-                                fix="phone_delete", device=device))
+            phone_path = copied.get(os.path.normcase(local.split("->")[0]))  # "x.zip->inner.exe": the zip
+            if not phone_path:
+                continue  # not one of the copied files
+            same = next((h for h in hits if h["phone_path"] == phone_path), None)
+            if same:
+                same["reasons"].insert(0, f"Microsoft Defender: {threat}")
+                same.update(verdict="Malware", score=100)
+                continue
+            hits.append(_result(phone_path, os.path.basename(phone_path), "Malware", 100,
+                                [f"Microsoft Defender: {threat}"], fix="phone_delete", device=device,
+                                phone_path=phone_path))
     finally:
         shutil.rmtree(staging, ignore_errors=True)  # our own temporary copies
     for h in hits:
