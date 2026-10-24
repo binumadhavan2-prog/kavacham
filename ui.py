@@ -14,6 +14,11 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
+# numpy's maths library reserves a large buffer per CPU thread (235 MB on an 8-thread laptop); the animations
+# never do matrix maths, so one thread is plenty. Must be set before numpy is imported.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 try:  # optional: richer cleaning animation
     import numpy as np
     from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -25,6 +30,7 @@ ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 import alerts
 import engine
 import explain
+import security
 import usb
 from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_FILE, TASK_NAMES, add_history, empty_recycle_bin,
                   find_duplicates, find_mpcmdrun, fixed_drives, human, is_admin, load_settings, notify, measure, clean, powershell_json,
@@ -33,40 +39,40 @@ from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_
 
 # ---------------------------------------------------------------- design tokens
 
-BG = "#040605"
-SIDEBAR = "#070a09"
-SURFACE = "#0d1110"
-SURFACE_2 = "#151b19"
-HOVER = "#1b2321"
-BORDER = "#18201d"
-TRACK = "#1a2220"
-TEXT = "#f2f5f3"
-MUTED = "#8a948f"
-SUBTLE = "#535d58"
-ACCENT = "#34c48e"
-ACCENT_HOVER = "#5ad8a8"
-ACCENT_DIM = "#0c211a"
-ACCENT_LINE = "#1d4c3b"  # hairline outline of primary buttons
-GOLD = "#c9a45c"  # the logo's gold, used only as a small brand detail
-ON_ACCENT = "#00140c"  # text and knobs on the accent
-OK, OK_DIM = "#34c48e", "#0c211a"
-WARN, WARN_DIM = "#e3a34e", "#2b2010"
-BAD, BAD_DIM = "#e8615a", "#2e1413"
+BG = "#070706"
+SIDEBAR = "#0a0908"
+SURFACE = "#11100d"
+SURFACE_2 = "#1b1915"
+HOVER = "#24211b"
+BORDER = "#211e18"
+TRACK = "#24211b"
+TEXT = "#f6f2ea"
+MUTED = "#9a9284"
+SUBTLE = "#5f594e"
+GOLD = "#d8b46e"  # the logo's gold: Kavacham's accent
+ACCENT = GOLD
+ACCENT_HOVER = "#ecd096"
+ACCENT_DIM = "#231c10"
+ACCENT_LINE = "#4e3f22"  # gold hairlines: hero frame, active menu item
+ON_ACCENT = "#1c1406"  # text and knobs on gold
+OK, OK_DIM = "#3fc28c", "#0d2219"  # green stays the colour of "protected"
+WARN, WARN_DIM = "#ec8f4c", "#2e1c0f"  # orange, so warnings don't blur into the gold
+BAD, BAD_DIM = "#ec625b", "#301513"
 TONES = {"ok": (OK, OK_DIM), "warn": (WARN, WARN_DIM), "bad": (BAD, BAD_DIM), "info": (ACCENT, ACCENT_DIM)}
 
 ICONS = {"home": "", "scan": "", "shield": "", "warning": "", "clean": "",
          "folder": "", "calendar": "", "refresh": "", "play": "", "stop": "",
          "download": "", "check": "", "clock": "", "admin": "", "drive": "",
          "bolt": "", "file": "", "open": "", "history": "", "search": "",
-         "copy": "", "arrow": ""}
+         "copy": "", "arrow": "", "lock": "\ue72e"}
 
-# Cleaner groups. Colors are the first three dark-mode categorical slots of the dataviz palette,
-# validated on SURFACE (#131920): all pairs pass CVD and normal-vision separation and 3:1 contrast.
+# Cleaner groups: gold, terracotta and green, picked to stay apart from each other (also for colour-blind eyes)
+# and to sit with the gold theme.
 CLEAN_GROUPS = [
-    ("System", "#3987e5", ["User temporary files", "Windows temporary files", "Thumbnail cache",
+    ("System", "#d8b46e", ["User temporary files", "Windows temporary files", "Thumbnail cache",
                            "Crash dumps & error reports", "Windows Update download cache"]),
-    ("Browsers", "#d95926", ["Google Chrome cache", "Microsoft Edge cache", "Firefox cache"]),
-    ("Recycle Bin", "#199e70", ["Recycle Bin"]),
+    ("Browsers", "#d0653f", ["Google Chrome cache", "Microsoft Edge cache", "Firefox cache"]),
+    ("Recycle Bin", "#3fa98a", ["Recycle Bin"]),
 ]
 
 DUP_MIN_SIZES = {"Any size": 1, "100 KB": 100 * 1024, "1 MB": 1024 ** 2, "10 MB": 10 * 1024 ** 2,
@@ -91,12 +97,13 @@ def init_fonts(root):
     light = pick("Segoe UI Variable Display Semil", "Segoe UI Semilight", "Segoe UI")
     semi = pick("Segoe UI Variable Display Semib", "Segoe UI Semibold", "Segoe UI")
     text_semi = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold", "Segoe UI")
+    serif = pick("Sitka Display", "Cambria", "Georgia", light)
     icon, mono = pick("Segoe Fluent Icons", "Segoe MDL2 Assets"), pick("Cascadia Mono", "Consolas")
     F.update({
         "body": (ui, 10), "body_b": (text_semi, 10), "small": (ui, 9), "small_b": (text_semi, 9),
-        "caption": (text_semi, 8), "h1": (light, 24), "h2": (semi, 13),
-        "h3": (light, 15), "hero": (light, 26), "big": (light, 32),
-        "brand": (semi, 14), "nav": (ui, 10), "button": (text_semi, 10),
+        "caption": (text_semi, 8), "h1": (serif, 25), "h2": (semi, 13),
+        "h3": (light, 15), "hero": (serif, 27), "big": (serif, 34),
+        "brand": (serif, 16, "bold"), "nav": (ui, 10), "button": (text_semi, 10),
         "icon": (icon, 13), "icon_sm": (icon, 11), "icon_lg": (icon, 20), "icon_xl": (icon, 36), "mono": (mono, 9),
     })
 
@@ -122,6 +129,30 @@ def round_rect(c, x1, y1, x2, y2, r, **kw):
     return c.create_polygon(pts, smooth=True, **kw)
 
 
+def _mix(a, b, t):
+    """Colour a blended toward b by t (0..1)."""
+    a, b = [int(a[i:i + 2], 16) for i in (1, 3, 5)], [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
+
+def gold_rule(parent, width=None, height=2, center=False):
+    """A gold hairline that fades into the background: to the right, or toward both ends when centred.
+    Without a width it stretches to fill its parent."""
+    c = tk.Canvas(parent, height=height, bg=parent["bg"], highlightthickness=0, bd=0,
+                  **({"width": width} if width else {}))
+
+    def draw(w):
+        c.delete("all")
+        for x in range(0, w, 2):
+            t = abs(x - w / 2) / (w / 2) if center else x / w
+            c.create_rectangle(x, 0, x + 2, height, width=0, fill=_mix(GOLD, parent["bg"], min(1, t) ** 1.4))
+    if width:
+        draw(width)
+    else:
+        c.bind("<Configure>", lambda e: draw(e.width))
+    return c
+
+
 def label(parent, text="", font="body", fg=TEXT, **kw):
     return tk.Label(parent, text=text, font=F[font], fg=fg, bg=parent["bg"], **kw)
 
@@ -140,19 +171,27 @@ class Card(tk.Frame):
     """Borderless panel with rounded corners. Tk frames can't be rounded, so each corner gets a small canvas
     painted in the parent's colour with a quarter circle of the card's; it sits in the padding, under no content."""
 
-    def __init__(self, parent, padding=20, bg=SURFACE, radius=16, **kw):
+    def __init__(self, parent, padding=20, bg=SURFACE, radius=16, border=None, **kw):
         super().__init__(parent, bg=bg, highlightthickness=0, padx=px(padding), pady=px(padding), **kw)
-        r = px(min(radius, padding))
+        r, pad = px(min(radius, padding)), px(padding)
         if r < 2:
             return
         for corner in ("nw", "ne", "sw", "se"):
             c = tk.Canvas(self, width=r, height=r, bg=parent["bg"], highlightthickness=0, bd=0)
             x0, y0 = (0 if corner[1] == "w" else -r), (0 if corner[0] == "n" else -r)
-            c.create_oval(x0, y0, x0 + 2 * r, y0 + 2 * r, fill=bg, outline=bg)
+            c.create_oval(x0, y0, x0 + 2 * r - 1, y0 + 2 * r - 1, fill=bg, outline=border or bg)
             # place() measures from inside the padding, so step back out to the card's real edge
-            pad = px(padding)
             c.place(relx=0 if corner[1] == "w" else 1, rely=0 if corner[0] == "n" else 1, anchor=corner,
                     x=-pad if corner[1] == "w" else pad, y=-pad if corner[0] == "n" else pad)
+        if border:  # straight edges between the corners
+            for side in ("n", "s", "w", "e"):
+                line = tk.Frame(self, bg=border, highlightthickness=0)
+                if side in "ns":
+                    line.place(relx=0, rely=0 if side == "n" else 1, anchor="nw" if side == "n" else "sw",
+                               x=r - pad, y=-pad if side == "n" else pad, relwidth=1, width=2 * (pad - r), height=1)
+                else:
+                    line.place(relx=0 if side == "w" else 1, rely=0, anchor="nw" if side == "w" else "ne",
+                               x=-pad if side == "w" else pad, y=r - pad, relheight=1, height=2 * (pad - r), width=1)
 
 
 class CanvasWidget(tk.Canvas):
@@ -196,16 +235,16 @@ class CanvasWidget(tk.Canvas):
 
 class Button(CanvasWidget):
     STYLES = {  # fill, hover fill, text, border
-        "primary": (ACCENT_DIM, "#113026", ACCENT_HOVER, ACCENT_LINE),
+        "primary": (GOLD, ACCENT_HOVER, ON_ACCENT, None),
         "secondary": (SURFACE_2, HOVER, TEXT, None),
         "ghost": (None, SURFACE_2, ACCENT, None),
-        "danger": (BAD_DIM, "#3d1a18", BAD, "#5a2421"),
+        "danger": (BAD_DIM, "#3f1b18", BAD, "#5c2622"),
     }
 
     def __init__(self, parent, text, command=None, kind="secondary", icon=None, width=None, height=36):
         self.text, self.icon, self.command, self.kind = text, icon, command, kind
-        tf, icf = tkfont.Font(font=F["button"]), tkfont.Font(font=F["icon_sm"])
-        self._tw = tf.measure(text)
+        self._tf, icf = tkfont.Font(font=F["button"]), tkfont.Font(font=F["icon_sm"])
+        self._tw = self._tf.measure(text)
         self._iw = icf.measure(ICONS[icon]) + px(8) if icon else 0
         super().__init__(parent, width=width or self._tw + self._iw + px(40), height=px(height))
         self.bind("<ButtonRelease-1>", self._click)
@@ -221,6 +260,7 @@ class Button(CanvasWidget):
         w = self.winfo_width() if self.winfo_width() > 1 else int(self.cget("width"))
         h = int(self.cget("height"))
         fill, hover, fg, border = self.STYLES[self.kind]
+        self._tw = self._tf.measure(self.text)  # the text may have changed since it was created
         if self.disabled:
             fill, fg, border = (SURFACE_2 if fill else None), SUBTLE, (BORDER if border else None)
         elif self._hover:
@@ -382,7 +422,7 @@ class StatusRing(tk.Canvas):
     thread; each tick only swaps an image, and it idles while the dashboard is hidden. Without Pillow it falls back
     to a flat ring."""
 
-    FRAMES, SS = 48, 2
+    FRAMES, SS, TICK = 32, 2, 90  # frames per turn, supersampling, ms per frame
 
     def __init__(self, parent, size=196):
         self.size = px(size)
@@ -427,6 +467,11 @@ class StatusRing(tk.Canvas):
     def _shown_tone(self):
         return "info" if self._spinning else self.tone
 
+    @staticmethod
+    def _color(tone):
+        """Orb colour: gold while all is well (or scanning), the warning colour otherwise."""
+        return GOLD if tone in ("ok", "info") else TONES[tone][0]
+
     def _emblem(self):
         """The Kavacham emblem, cut to a circle with a soft edge so it melts into the orb's glow."""
         path = os.path.join(ASSETS, "logo.png")
@@ -450,7 +495,7 @@ class StatusRing(tk.Canvas):
         self.itemconfigure(self.glyph, text=glyph, fill=TEXT if ok else TONES[tone][0])
 
     def _render(self, tone):
-        color, bgcol = TONES[tone][0], self["bg"]
+        color, bgcol = self._color(tone), self["bg"]
         if color in self.frames or self._rendering == color:
             return
         self._rendering = color
@@ -484,28 +529,63 @@ class StatusRing(tk.Canvas):
         if getattr(self, "_core", None) is None or self._core.shape[0] != n:
             yy, xx = np.mgrid[0:n, 0:n]
             self._core = np.exp(-((xx - n / 2) ** 2 + (yy - n / 2) ** 2) / (2 * (n * 0.16) ** 2)) * 0.5
-        inten = np.clip(dots * 1.8 + glow * 6 + self._core, 0, 1.6)[..., None]
+        inten = np.clip(dots * 1.8 + glow * 6 + self._core, 0, 1.6)
+        # shrink first, then colour: a quarter of the pixels to tint
+        small = Image.fromarray((inten * 159).astype(np.uint8)).resize((self.size, self.size), Image.LANCZOS)
+        inten = (np.asarray(small, np.float32) / 159)[..., None]
         c = np.array(Image.new("RGB", (1, 1), color).getpixel((0, 0)), np.float32)
-        b = np.array(Image.new("RGB", (1, 1), bgcol).getpixel((0, 0)), np.float32)
+        b = self._backdrop(bgcol)
         rgb = b + inten * (c - b) + np.clip(inten - 1, 0, 1) * (255 - c) * 0.8  # hot spots go toward white
-        img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
-        return img.resize((self.size, self.size), Image.LANCZOS)
+        return Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
+
+    def _backdrop(self, bgcol):
+        """Behind the orb: faint gold armour scales and a warm glow, fading to the card colour at the edge."""
+        if getattr(self, "_back", None) is not None and self._back[0] == bgcol:
+            return self._back[1]
+        s, ss = self.size, 3
+        n = s * ss
+        scales = Image.new("L", (n, n), 0)
+        d = ImageDraw.Draw(scales)
+        r = n / 9
+        for row in range(-1, int(n / (r * 0.62)) + 2):  # top to bottom, each row overlapping the one above
+            y = row * r * 0.62
+            for col in range(-1, int(n / r) + 2):
+                x = col * r * 1.1 + (r * 0.55 if row % 2 else 0)
+                d.ellipse((x - r * 0.55, y - r * 0.55, x + r * 0.55, y + r * 0.55), fill=0, outline=255,
+                          width=ss)
+        scales = np.asarray(scales.resize((s, s), Image.LANCZOS), np.float32) / 255
+        yy, xx = np.mgrid[0:s, 0:s]
+        dist = np.hypot(xx - s / 2, yy - s / 2) / (s / 2)
+        fade = np.clip(1 - dist, 0, 1) ** 1.6
+        amount = (scales * 0.16 + 0.22 * np.exp(-dist ** 2 / 0.18)) * fade
+        b = np.array(Image.new("RGB", (1, 1), bgcol).getpixel((0, 0)), np.float32)
+        g = np.array(Image.new("RGB", (1, 1), GOLD).getpixel((0, 0)), np.float32)
+        back = b + amount[..., None] * (g - b)
+        self._back = (bgcol, back)
+        return back
 
     def _loop(self):
         if self._pending:
             color, imgs = self._pending
             self._pending, self._rendering = None, None
+            current = self._color(self._shown_tone())
+            for old in [k for k in self.frames if k not in (color, current)]:
+                del self.frames[old]  # keep at most two colours in memory
             self.frames[color] = [ImageTk.PhotoImage(im) for im in imgs]
             self._glyph()
-        color = TONES[self._shown_tone()][0]
+        color = self._color(self._shown_tone())
         frames = self.frames.get(color) or next(iter(self.frames.values()), None)
-        visible = self.winfo_ismapped()
-        if frames and visible:
-            self.idx = (self.idx + (3 if self._spinning else 1)) % len(frames)
+        # animate only while the Overview is on screen and Kavacham is the active window (or a scan runs), so the
+        # orb costs nothing while you're working in other apps
+        top = self.winfo_toplevel()
+        visible = self.winfo_ismapped() and top.state() != "iconic" and (
+            self._spinning or top.focus_displayof() is not None)
+        if frames and (visible or self.itemcget(self.item, "image") == ""):
+            self.idx = (self.idx + (2 if self._spinning else 1)) % len(frames)
             self.itemconfigure(self.item, image=frames[self.idx])
         if color not in self.frames:
             self._render(self._shown_tone())
-        self.after(60 if visible else 500, self._loop)
+        self.after(self.TICK if visible else 500, self._loop)
 
     # ---- flat fallback (no Pillow)
     def _tick(self):
@@ -540,7 +620,7 @@ class SpiralFunnel(tk.Canvas):
 
     THREADS, SEGMENTS, FRAMES, FINALE, FADE, SS = 21, 56, 60, 34, 14, 2
     MIN_SHOW = 2.6  # seconds: even a quick clean gets a visible moment
-    BLUE = [(0.0, "#06291c"), (0.45, "#1fa877"), (0.75, "#7ff0c4"), (1.0, "#f2fff9")]  # accent green, kept the name
+    BLUE = [(0.0, "#2a1d08"), (0.45, "#b88a3c"), (0.75, "#f0d396"), (1.0, "#fffaf0")]  # accent gold, kept the name
     GREEN = [(0.0, "#12291f"), (0.45, "#3a9e72"), (0.75, "#86d4ae"), (1.0, "#f2fbf6")]
 
     def __init__(self, parent, groups, width=680, height=170):
@@ -787,7 +867,8 @@ class NavItem(tk.Frame):
         super().__init__(parent, bg=SIDEBAR, cursor="hand2")
         self.bar = tk.Frame(self, bg=SIDEBAR, width=px(3))
         self.bar.pack(side="left", fill="y")
-        self.inner = tk.Frame(self, bg=SIDEBAR, padx=px(14), pady=px(10))
+        self.inner = tk.Frame(self, bg=SIDEBAR, padx=px(13), pady=px(6), highlightthickness=1,
+                              highlightbackground=SIDEBAR)
         self.inner.pack(side="left", fill="x", expand=True, padx=(px(8), px(12)))
         self.icon = tk.Label(self.inner, text=ICONS[icon], font=F["icon"], bg=SIDEBAR, fg=MUTED, width=2)
         self.icon.pack(side="left")
@@ -804,12 +885,13 @@ class NavItem(tk.Frame):
         self._paint()
 
     def _paint(self, hover=False):
-        bg = SURFACE if hover and not self.active else SIDEBAR
-        self.bar.configure(bg=ACCENT if self.active else SIDEBAR)
+        bg = ACCENT_DIM if self.active else SURFACE if hover else SIDEBAR
+        self.bar.configure(bg=GOLD if self.active else SIDEBAR)
+        self.inner.configure(highlightbackground=ACCENT_LINE if self.active else bg)
         for w in (self.inner, self.icon, self.text):
             w.configure(bg=bg)
-        self.icon.configure(fg=ACCENT if self.active else (TEXT if hover else MUTED))
-        self.text.configure(fg=TEXT if self.active or hover else MUTED)
+        self.icon.configure(fg=GOLD if self.active else (TEXT if hover else MUTED))
+        self.text.configure(fg=ACCENT_HOVER if self.active else TEXT if hover else MUTED)
 
 
 class Segmented(tk.Frame):
@@ -963,6 +1045,10 @@ class App(tk.Tk):
 
     def _engine_startup(self):
         """Keep the engine fresh: update stale feeds and make sure the monitor runs if it's switched on."""
+        try:  # one background checkup so the Overview can show the security score
+            self.ui(self._show_security, security.run_checks())
+        except Exception as e:
+            engine.log_event("protection", "warn", "Security checkup failed", str(e)[:200])
         cfg = self.settings["engine"]
         if cfg["realtime"] and not engine.monitor_running():
             engine.start_monitor()
@@ -1030,7 +1116,7 @@ class App(tk.Tk):
         side.pack_propagate(False)
         tk.Frame(self, bg=BORDER, width=1).pack(side="left", fill="y")
 
-        brand = frame(side, padx=px(22), pady=px(24))
+        brand = frame(side, padx=px(22), pady=px(20))
         brand.pack(fill="x")
         logo = tk.Canvas(brand, width=px(38), height=px(38), bg=SIDEBAR, highlightthickness=0)
         logo_file = os.path.join(ASSETS, "logo.png")
@@ -1050,9 +1136,11 @@ class App(tk.Tk):
         label(names, "Kavacham", "brand").pack(anchor="w")
         label(names, "YOUR DIGITAL SHIELD", "caption", GOLD).pack(anchor="w", pady=(px(1), 0))
 
-        label(side, "MENU", "caption", SUBTLE).pack(anchor="w", padx=px(26), pady=(px(6), px(6)))
+        gold_rule(side, height=1, center=True).pack(fill="x", padx=px(22))
+        label(side, "MENU", "caption", SUBTLE).pack(anchor="w", padx=px(26), pady=(px(14), px(6)))
         self.nav = {}
-        for key, icon, text in [("dashboard", "home", "Overview"), ("scan", "scan", "Virus scan"),
+        for key, icon, text in [("dashboard", "home", "Overview"), ("security", "lock", "Security checkup"),
+                                ("scan", "scan", "Virus scan"),
                                 ("engine", "search", "Engine scan"), ("usb", "drive", "USB & phone"),
                                 ("threats", "history", "Threat history"),
                                 ("quarantine", "shield", "Quarantine"), ("events", "file", "Security activity"),
@@ -1082,6 +1170,7 @@ class App(tk.Tk):
         self.body.pack(side="left", fill="both", expand=True)
         self.pages = {
             "dashboard": self._page_dashboard(),
+            "security": self._page_security(),
             "scan": self._page_scan(),
             "engine": self._page_engine(),
             "usb": self._page_usb(),
@@ -1117,6 +1206,8 @@ class App(tk.Tk):
             self.refresh_usb()
         elif key == "schedule":
             self.refresh_schedule()
+        elif key == "security":
+            self.refresh_security()
         elif key == "cleaner" and not self._cleaner_ready:
             self._cleaner_ready = True  # measuring is read-only, so analyze automatically on first visit
             self.analyze()
@@ -1126,14 +1217,193 @@ class App(tk.Tk):
         head = frame(p)
         head.pack(fill="x", pady=(0, px(22)))
         label(head, title, "h1").pack(anchor="w")
-        label(head, subtitle, "body", MUTED).pack(anchor="w", pady=(px(4), 0))
+        gold_rule(head, px(120)).pack(anchor="w", pady=(px(4), px(8)))
+        label(head, subtitle, "body", MUTED).pack(anchor="w")
         return p
+
+    # ---------------------------------------------------------- security checkup
+    def _page_security(self):
+        p = self.page("Security checkup", "How well Windows is set up to protect you, and one-click fixes for the "
+                                          "weak spots. Everything is checked on this PC.")
+        self._sec, self._sec_busy, self._blocked = None, False, None  # None: blocked list not loaded yet
+        scroll = ScrollFrame(p)
+        scroll.pack(fill="both", expand=True)
+        body = scroll.inner
+
+        top = Card(body, padding=26)
+        top.pack(fill="x", padx=(0, px(4)))
+        row = frame(top)
+        row.pack(fill="x")
+        num = frame(row)
+        num.pack(side="left")
+        self.sec_score = label(num, "—", "big")
+        self.sec_score.pack(side="left", anchor="s")
+        label(num, " / 100", "body", MUTED).pack(side="left", anchor="s", pady=(0, px(8)))
+        mid = frame(row)
+        mid.pack(side="left", fill="x", expand=True, padx=(px(26), 0))
+        self.sec_badge = badge(mid, "CHECKING", "info")
+        self.sec_badge.pack(anchor="w")
+        self.sec_title = label(mid, "Checking your security settings…", "h3")
+        self.sec_title.pack(anchor="w", pady=(px(4), 0))
+        self.sec_when = label(mid, "", "small", MUTED)
+        self.sec_when.pack(anchor="w")
+        self.sec_again = Button(row, "Check again", lambda: self.refresh_security(force=True), "secondary",
+                                icon="refresh")
+        self.sec_again.pack(side="right", anchor="n")
+        self.sec_bar = Bar(top, height=6)
+        self.sec_bar.pack(fill="x", pady=(px(18), 0))
+
+        shield = Card(body, padding=22)
+        shield.pack(fill="x", padx=(0, px(4)), pady=(px(16), 0))
+        head = frame(shield)
+        head.pack(fill="x")
+        label(head, ICONS["lock"], "icon", ACCENT).pack(side="left")
+        label(head, "Ransomware shield", "h2").pack(side="left", padx=px(10))
+        self.shield_badge = badge(head, "…", "info")
+        self.shield_badge.pack(side="left")
+        self.shield_btn = Button(head, "Turn on", self.toggle_shield, "primary", width=px(110))
+        self.shield_btn.pack(side="right")
+        label(shield, "Only apps you trust can change files in Documents, Pictures, Videos, Music and Desktop. Even "
+                      "ransomware that antivirus misses can't lock your personal files. Uses Windows' built-in "
+                      "Controlled folder access.", "small", MUTED, wraplength=px(780), justify="left").pack(
+            anchor="w", pady=(px(8), px(10)))
+        label(shield, "BLOCKED IN THE LAST 30 DAYS", "caption", SUBTLE).pack(anchor="w", pady=(px(4), px(4)))
+        self.shield_tree = table(shield, [("time", "WHEN", 130, False), ("app", "APP", 300, True),
+                                          ("file", "TRIED TO CHANGE", 320, True)], height=4)
+        set_empty(self.shield_tree, "Nothing blocked. If a trusted app can't save your files, it shows up here.")
+        acts = frame(shield)
+        acts.pack(fill="x", pady=(px(10), 0))
+        Button(acts, "Allow selected app", self.shield_allow, "secondary", icon="check").pack(side="left")
+        label(acts, "Allowing needs administrator permission", "small", SUBTLE).pack(side="left", padx=px(12))
+
+        checks = Card(body, padding=22)
+        checks.pack(fill="x", padx=(0, px(4)), pady=(px(16), px(4)))
+        label(checks, "Checklist", "h2").pack(anchor="w")
+        label(checks, "Most important first. Fixes with a shield icon ask Windows for administrator permission.",
+              "small", MUTED).pack(anchor="w", pady=(px(4), px(4)))
+        self.sec_list = frame(checks)
+        self.sec_list.pack(fill="x")
+        return p
+
+    def refresh_security(self, force=False):
+        if self._sec_busy:
+            return
+        if self._sec and not force and time.time() - self._sec["time"] < 120 and self._blocked is not None:
+            self._show_security(self._sec)
+            return
+        self._sec_busy = True
+        self.sec_again.configure(state="disabled")
+        self.sec_when.configure(text="Checking…")
+
+        def work():
+            try:
+                result, blocked = security.run_checks(), security.blocked_apps()
+                self.ui(self._show_security, result, blocked)
+            except Exception as e:
+                self.ui(lambda m=str(e): self.sec_when.configure(text=f"Couldn't check: {m}"))
+            finally:
+                self._sec_busy = False
+                self.ui(lambda: self.sec_again.configure(state="normal"))
+        self.bg(work)
+
+    def _show_security(self, result, blocked=None):
+        self._sec = result
+        score, checks = result["score"], result["checks"]
+        todo = [c for c in checks if c["status"] in ("bad", "warn")]
+        tone = "ok" if score >= 75 else "warn" if score >= 50 else "bad"
+        word = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs attention" if score >= 50 else "At risk"
+        many = "s" if len(todo) != 1 else ""
+        title = f"{word}, nothing to fix" if not todo else f"{word}, {len(todo)} thing{many} to improve"
+        self.sec_line.configure(text=f"Security score {score}/100  ·  " +
+                                (f"{len(todo)} to improve  ›" if todo else "all good  ›"), fg=TONES[tone][0])
+        self.sec_score.configure(text=str(score), fg=TONES[tone][0])
+        self.sec_badge.configure(text="●  " + word.upper(),
+                                 fg=TONES[tone][0])
+        self.sec_title.configure(text=title)
+        self.sec_when.configure(text=security.checked_ago(result).capitalize())
+        self.sec_bar.set(score / 100, TONES[tone][0])
+
+        on = result["cfa"] == 1
+        self.shield_badge.configure(text="●  ON" if on else "●  AUDIT ONLY" if result["cfa"] == 2 else "●  OFF",
+                                    fg=OK if on else WARN)
+        self.shield_btn.kind = "secondary" if on else "primary"
+        self.shield_btn.configure(text="Turn off" if on else "Turn on")
+        if blocked is not None:
+            self._blocked = blocked
+            self.shield_tree.delete(*self.shield_tree.get_children())
+            for i, b in enumerate(blocked):
+                self.shield_tree.insert("", "end", iid=str(i), values=(b["time"], b["app"], b["file"]))
+
+        for w in self.sec_list.winfo_children():
+            w.destroy()
+        order = {"bad": 0, "warn": 1, "ok": 2, "na": 3}
+        for i, c in enumerate(sorted(checks, key=lambda c: (order[c["status"]], -c["weight"]))):
+            if i:
+                divider(self.sec_list)
+            row = frame(self.sec_list, pady=px(12))
+            row.pack(fill="x")
+            right = frame(row)
+            right.pack(side="right")
+            left = frame(row)
+            left.pack(side="left", fill="x", expand=True)
+            color = {"ok": OK, "warn": WARN, "bad": BAD, "na": SUBTLE}[c["status"]]
+            line = frame(left)
+            line.pack(anchor="w")
+            label(line, "●", "small", color).pack(side="left")
+            label(line, c["title"], "body_b").pack(side="left", padx=(px(8), 0))
+            label(left, c["detail"], "small", MUTED, wraplength=px(620), justify="left").pack(
+                anchor="w", padx=(px(20), 0), pady=(px(2), 0))
+            if c["fix"]:
+                script, admin = security.FIXES[c["fix"]]
+                text = "Open settings" if script.startswith("open:") else "Fix"
+                Button(right, text, lambda f=c["fix"]: self.security_fix(f),
+                       "primary" if c["status"] == "bad" else "secondary",
+                       icon="admin" if admin and not is_admin() else None).pack(side="right")
+            elif c["status"] == "ok":
+                label(right, ICONS["check"], "icon_sm", OK).pack(side="right")
+            elif c["status"] == "na":
+                label(right, "Not available on this PC", "small", SUBTLE).pack(side="right")
+
+    def security_fix(self, fix_id):
+        def work():
+            res = security.apply_fix(fix_id)
+            if res == "failed":
+                self.ui(messagebox.showwarning, "Kavacham", "That couldn't be changed. If Windows asked for "
+                                                            "permission, choose Yes and try again.")
+            elif res == "opened":
+                self.ui(messagebox.showinfo, "Kavacham", "Windows Security opened. Switch the setting on there, "
+                                                         "then click Check again.")
+            self.ui(self.refresh_security, True)
+        self.bg(work)
+
+    def toggle_shield(self):
+        on = bool(self._sec and self._sec["cfa"] == 1)
+        if on and not messagebox.askyesno("Kavacham", "Turn off the ransomware shield?\n\nAny program will be able "
+                                                       "to change your personal files again."):
+            return
+        self.security_fix("cfa_off" if on else "cfa")
+
+    def shield_allow(self):
+        sel = self.shield_tree.selection()
+        if not sel or not self._blocked:
+            messagebox.showinfo("Kavacham", "Select a blocked app in the list first.")
+            return
+        app = self._blocked[int(sel[0])]["app"]
+        if not app or not messagebox.askyesno("Kavacham", "Allow this app to change your protected folders?\n\n"
+                                                          f"{app}\n\nOnly do this for apps you trust."):
+            return
+
+        def work():
+            ok = security.allow_app(app)
+            self.ui(messagebox.showinfo if ok else messagebox.showwarning, "Kavacham",
+                    "Allowed. It can save to your folders now." if ok else "Couldn't allow it.")
+        self.bg(work)
 
     # ---------------------------------------------------------- overview
     def _page_dashboard(self):
         p = self.page("Overview", "Your protection and storage at a glance.")
 
-        hero = Card(p, padding=26)
+        hero = Card(p, padding=26, border=ACCENT_LINE)
         hero.pack(fill="x")
         self.ring = StatusRing(hero)
         self.ring.pack(side="left")
@@ -1145,6 +1415,9 @@ class App(tk.Tk):
         self.status_title.pack(anchor="w", pady=(px(8), px(2)))
         self.status_sub = label(text, "", "body", MUTED, wraplength=px(560), justify="left")
         self.status_sub.pack(anchor="w")
+        self.sec_line = label(text, "", "small_b", ACCENT, cursor="hand2")
+        self.sec_line.pack(anchor="w", pady=(px(8), 0))
+        self.sec_line.bind("<Button-1>", lambda _e: self.show("security"))
         actions = frame(text)
         actions.pack(anchor="w", pady=(px(18), 0))
         Button(actions, "Quick scan", lambda: (self.show("scan"), self.start_scan(1)), "primary",
@@ -1165,8 +1438,11 @@ class App(tk.Tk):
             card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else px(8), 0 if i == 3 else px(8)))
             top = frame(card)
             top.pack(fill="x")
-            label(top, ICONS[icon], "icon_sm", ACCENT).pack(side="left")
-            label(top, title, "small", MUTED).pack(side="left", padx=px(8))
+            medal = tk.Canvas(top, width=px(28), height=px(28), bg=card["bg"], highlightthickness=0)
+            medal.create_oval(1, 1, px(28) - 1, px(28) - 1, fill=ACCENT_DIM, outline=ACCENT_LINE)
+            medal.create_text(px(14), px(15), text=ICONS[icon], font=F["icon_sm"], fill=GOLD)
+            medal.pack(side="left")
+            label(top, title, "small", MUTED).pack(side="left", padx=px(10))
             value = label(card, "—", "h3")
             value.pack(anchor="w", pady=(px(12), px(2)))
             sub = label(card, "", "small", MUTED)
