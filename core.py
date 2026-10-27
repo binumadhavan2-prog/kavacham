@@ -334,6 +334,7 @@ DEFAULT_SETTINGS = {
     "usb": {"auto_scan": True, "deep_consent": [],
             "storage": {"scope": "Whole phone", "large": "100 MB", "dup": "1 MB", "hidden": False,
                         "app_folders": False}},
+    "privacy": {"watch": True, "trusted": []},  # camera & microphone alerts; trusted: app ids that don't pop up
 }
 
 

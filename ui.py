@@ -7,6 +7,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -30,6 +31,8 @@ ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 import alerts
 import engine
 import explain
+import phone as phonecare
+import privacy
 import security
 import usb
 from core import (CLEAN_TARGETS, DAYS, DEFAULT_SETTINGS, HISTORY_FILE, SETTINGS_FILE, TASK_NAMES, add_history, empty_recycle_bin,
@@ -64,7 +67,7 @@ ICONS = {"home": "", "scan": "", "shield": "", "warning": "", "clean
          "folder": "", "calendar": "", "refresh": "", "play": "", "stop": "",
          "download": "", "check": "", "clock": "", "admin": "", "drive": "",
          "bolt": "", "file": "", "open": "", "history": "", "search": "",
-         "copy": "", "arrow": "", "lock": "\ue72e"}
+         "copy": "", "arrow": "", "lock": "\ue72e", "wifi": "\ue701", "undo": "\ue7a7", "camera": "", "mic": ""}
 
 # Cleaner groups: gold, terracotta and green, picked to stay apart from each other (also for colour-blind eyes)
 # and to sit with the gold theme.
@@ -867,7 +870,7 @@ class NavItem(tk.Frame):
         super().__init__(parent, bg=SIDEBAR, cursor="hand2")
         self.bar = tk.Frame(self, bg=SIDEBAR, width=px(3))
         self.bar.pack(side="left", fill="y")
-        self.inner = tk.Frame(self, bg=SIDEBAR, padx=px(13), pady=px(6), highlightthickness=1,
+        self.inner = tk.Frame(self, bg=SIDEBAR, padx=px(13), pady=px(4), highlightthickness=1,
                               highlightbackground=SIDEBAR)
         self.inner.pack(side="left", fill="x", expand=True, padx=(px(8), px(12)))
         self.icon = tk.Label(self.inner, text=ICONS[icon], font=F["icon"], bg=SIDEBAR, fg=MUTED, width=2)
@@ -1050,8 +1053,11 @@ class App(tk.Tk):
         except Exception as e:
             engine.log_event("protection", "warn", "Security checkup failed", str(e)[:200])
         cfg = self.settings["engine"]
-        if cfg["realtime"] and not engine.monitor_running():
-            engine.start_monitor()
+        if engine.monitor_wanted(self.settings):
+            if not engine.monitor_task_exists():
+                engine.set_monitor(True)  # registers start-at-sign-in and starts it now
+            elif not engine.monitor_running():
+                engine.start_monitor()
         try:
             self._alerts = alerts.run_checks()[1]  # also toasts new problems (at most once a day each)
         except Exception:
@@ -1070,7 +1076,10 @@ class App(tk.Tk):
         try:
             while True:
                 fn, args = self.q.get_nowait()
-                fn(*args)
+                try:
+                    fn(*args)
+                except Exception:  # one failed update mustn't stop every later one
+                    self.report_callback_exception(*sys.exc_info())
         except queue.Empty:
             pass
         self.after(80, self._drain)
@@ -1116,7 +1125,7 @@ class App(tk.Tk):
         side.pack_propagate(False)
         tk.Frame(self, bg=BORDER, width=1).pack(side="left", fill="y")
 
-        brand = frame(side, padx=px(22), pady=px(20))
+        brand = frame(side, padx=px(22), pady=px(16))
         brand.pack(fill="x")
         logo = tk.Canvas(brand, width=px(38), height=px(38), bg=SIDEBAR, highlightthickness=0)
         logo_file = os.path.join(ASSETS, "logo.png")
@@ -1138,19 +1147,6 @@ class App(tk.Tk):
 
         gold_rule(side, height=1, center=True).pack(fill="x", padx=px(22))
         label(side, "MENU", "caption", SUBTLE).pack(anchor="w", padx=px(26), pady=(px(14), px(6)))
-        self.nav = {}
-        for key, icon, text in [("dashboard", "home", "Overview"), ("security", "lock", "Security checkup"),
-                                ("scan", "scan", "Virus scan"),
-                                ("engine", "search", "Engine scan"), ("usb", "drive", "USB & phone"),
-                                ("threats", "history", "Threat history"),
-                                ("quarantine", "shield", "Quarantine"), ("events", "file", "Security activity"),
-                                ("cleaner", "clean", "Storage cleaner"),
-                                ("large", "folder", "Large files"), ("duplicates", "copy", "Duplicate files"),
-                                ("schedule", "calendar", "Automation")]:
-            item = NavItem(side, icon, text, lambda k=key: self.show(k))
-            item.pack(fill="x", pady=1)
-            self.nav[key] = item
-
         foot = Card(side, padding=14, bg=SURFACE)
         foot.pack(side="bottom", fill="x", padx=px(16), pady=px(16))
         if is_admin():
@@ -1165,12 +1161,26 @@ class App(tk.Tk):
                   wraplength=px(180), justify="left").pack(anchor="w", pady=(px(3), px(10)))
             Button(foot, "Restart as admin", self._elevate, "secondary", icon="admin",
                    width=px(176), height=32).pack(anchor="w")
+        self.nav = {}
+        for key, icon, text in [("dashboard", "home", "Overview"), ("security", "lock", "Security checkup"),
+                                ("privacy", "camera", "Privacy"),
+                                ("scan", "scan", "Virus scan"),
+                                ("engine", "search", "Engine scan"), ("usb", "drive", "USB & phone"),
+                                ("threats", "history", "Threat history"),
+                                ("quarantine", "shield", "Quarantine"), ("events", "file", "Security activity"),
+                                ("cleaner", "clean", "Storage cleaner"),
+                                ("large", "folder", "Large files"), ("duplicates", "copy", "Duplicate files"),
+                                ("schedule", "calendar", "Automation")]:
+            item = NavItem(side, icon, text, lambda k=key: self.show(k))
+            item.pack(fill="x", pady=1)
+            self.nav[key] = item
 
         self.body = frame(self, bg=BG, padx=px(36), pady=px(28))
         self.body.pack(side="left", fill="both", expand=True)
         self.pages = {
             "dashboard": self._page_dashboard(),
             "security": self._page_security(),
+            "privacy": self._page_privacy(),
             "scan": self._page_scan(),
             "engine": self._page_engine(),
             "usb": self._page_usb(),
@@ -1208,6 +1218,9 @@ class App(tk.Tk):
             self.refresh_schedule()
         elif key == "security":
             self.refresh_security()
+        elif key == "privacy":
+            self.refresh_privacy()
+            self.bg(lambda: self.ui(self._show_cam, privacy.usage()))
         elif key == "cleaner" and not self._cleaner_ready:
             self._cleaner_ready = True  # measuring is read-only, so analyze automatically on first visit
             self.analyze()
@@ -1334,13 +1347,17 @@ class App(tk.Tk):
             for i, b in enumerate(blocked):
                 self.shield_tree.insert("", "end", iid=str(i), values=(b["time"], b["app"], b["file"]))
 
-        for w in self.sec_list.winfo_children():
+        self._render_checks(self.sec_list, checks, security.FIXES, self.security_fix)
+
+    def _render_checks(self, box, checks, fixes, on_fix):
+        """Checklist rows, most important problems first, with a Fix / Open settings button each."""
+        for w in box.winfo_children():
             w.destroy()
         order = {"bad": 0, "warn": 1, "ok": 2, "na": 3}
         for i, c in enumerate(sorted(checks, key=lambda c: (order[c["status"]], -c["weight"]))):
             if i:
-                divider(self.sec_list)
-            row = frame(self.sec_list, pady=px(12))
+                divider(box)
+            row = frame(box, pady=px(12))
             row.pack(fill="x")
             right = frame(row)
             right.pack(side="right")
@@ -1354,9 +1371,10 @@ class App(tk.Tk):
             label(left, c["detail"], "small", MUTED, wraplength=px(620), justify="left").pack(
                 anchor="w", padx=(px(20), 0), pady=(px(2), 0))
             if c["fix"]:
-                script, admin = security.FIXES[c["fix"]]
-                text = "Open settings" if script.startswith("open:") else "Fix"
-                Button(right, text, lambda f=c["fix"]: self.security_fix(f),
+                script, admin = fixes[c["fix"]]
+                text = "Open settings" if script.startswith("open:") else "Turn on" if script.startswith("kavacham:") \
+                    else "Fix"
+                Button(right, text, lambda f=c["fix"]: on_fix(f),
                        "primary" if c["status"] == "bad" else "secondary",
                        icon="admin" if admin and not is_admin() else None).pack(side="right")
             elif c["status"] == "ok":
@@ -1397,6 +1415,214 @@ class App(tk.Tk):
             ok = security.allow_app(app)
             self.ui(messagebox.showinfo if ok else messagebox.showwarning, "Kavacham",
                     "Allowed. It can save to your folders now." if ok else "Couldn't allow it.")
+        self.bg(work)
+
+    # ---------------------------------------------------------- privacy
+    def _page_privacy(self):
+        p = self.page("Privacy", "Know when apps use your camera or microphone, and keep Windows from sharing more than "
+                                 "it needs to. Everything is checked on this PC.")
+        self._priv, self._priv_busy, self._cam_rows = None, False, []
+        scroll = ScrollFrame(p)
+        scroll.pack(fill="both", expand=True)
+        body = scroll.inner
+
+        cam = Card(body, padding=22)
+        cam.pack(fill="x", padx=(0, px(4)))
+        head = frame(cam)
+        head.pack(fill="x")
+        label(head, ICONS["camera"], "icon", ACCENT).pack(side="left")
+        label(head, "Camera & microphone", "h2").pack(side="left", padx=px(10))
+        self.cam_watch = tk.BooleanVar(value=self.settings["privacy"]["watch"])
+        Toggle(head, self.cam_watch, command=self.privacy_toggle_watch).pack(side="right")
+        label(head, "Alert me", "small_b", MUTED).pack(side="right", padx=px(8))
+        label(cam, "Kavacham pops up a notice whenever an app turns on your camera or microphone, even when Kavacham "
+                   "is closed. Apps you trust are still listed here but don't pop up.", "small", MUTED,
+              wraplength=px(780), justify="left").pack(anchor="w", pady=(px(8), px(12)))
+        live = frame(cam)
+        live.pack(fill="x", pady=(0, px(12)))
+        self.cam_live_dot = label(live, "●", "body", OK)
+        self.cam_live_dot.pack(side="left")
+        self.cam_live = label(live, "Checking…", "body_b")
+        self.cam_live.pack(side="left", padx=px(8))
+        self.cam_tree = table(cam, [("camera", "CAMERA", 170, False), ("mic", "MICROPHONE", 170, False),
+                                    ("trust", "", 90, False)], height=6, tree_column=("APP", 330))
+        self.cam_tree.tag_configure("live", foreground=BAD)
+        set_empty(self.cam_tree, "No app has used your camera or microphone yet.")
+        acts = frame(cam)
+        acts.pack(fill="x", pady=(px(12), 0))
+        Button(acts, "Trust", lambda: self.privacy_trust(True), "secondary", icon="check").pack(side="left")
+        Button(acts, "Stop trusting", lambda: self.privacy_trust(False), "secondary").pack(side="left", padx=px(8))
+        Button(acts, "Close app", self.privacy_close_app, "danger", icon="stop").pack(side="left")
+        Button(acts, "Microphone settings", lambda: os.startfile("ms-settings:privacy-microphone"), "ghost",
+               icon="open").pack(side="right")
+        Button(acts, "Camera settings", lambda: os.startfile("ms-settings:privacy-webcam"), "ghost",
+               icon="open").pack(side="right", padx=px(8))
+
+        top = Card(body, padding=26)
+        top.pack(fill="x", padx=(0, px(4)), pady=(px(16), 0))
+        row = frame(top)
+        row.pack(fill="x")
+        num = frame(row)
+        num.pack(side="left")
+        self.priv_score = label(num, "—", "big")
+        self.priv_score.pack(side="left", anchor="s")
+        label(num, " / 100", "body", MUTED).pack(side="left", anchor="s", pady=(0, px(8)))
+        mid = frame(row)
+        mid.pack(side="left", fill="x", expand=True, padx=(px(26), 0))
+        self.priv_badge = badge(mid, "CHECKING", "info")
+        self.priv_badge.pack(anchor="w")
+        self.priv_title = label(mid, "Checking your privacy settings…", "h3")
+        self.priv_title.pack(anchor="w", pady=(px(4), 0))
+        self.priv_when = label(mid, "", "small", MUTED)
+        self.priv_when.pack(anchor="w")
+        self.priv_again = Button(row, "Check again", lambda: self.refresh_privacy(force=True), "secondary",
+                                 icon="refresh")
+        self.priv_again.pack(side="right", anchor="n")
+        self.priv_bar = Bar(top, height=6)
+        self.priv_bar.pack(fill="x", pady=(px(18), 0))
+
+        checks = Card(body, padding=22)
+        checks.pack(fill="x", padx=(0, px(4)), pady=(px(16), px(4)))
+        label(checks, "Privacy checklist", "h2").pack(anchor="w")
+        label(checks, "Most important first. Fixes change only privacy settings; your files and apps aren't touched. "
+                      "Fixes with a shield icon ask Windows for administrator permission.", "small", MUTED,
+              wraplength=px(780), justify="left").pack(anchor="w", pady=(px(4), px(4)))
+        self.priv_list = frame(checks)
+        self.priv_list.pack(fill="x")
+        self.after(2000, self._privacy_tick)
+        return p
+
+    def _privacy_tick(self):
+        """Live camera & microphone status while the Privacy page is open."""
+        if self.pages["privacy"].winfo_ismapped():
+            self.bg(lambda: self.ui(self._show_cam, privacy.usage()))
+        self.after(2000, self._privacy_tick)
+
+    def _show_cam(self, rows):
+        self._cam_rows = rows
+        trusted = set(self.settings["privacy"]["trusted"])
+        sel = set(self.cam_tree.selection())
+        when = lambda u: "● In use now" if u and u["in_use"] else ago(u["start"]) if u else "—"  # noqa: E731
+        self.cam_tree.delete(*self.cam_tree.get_children())
+        for a in rows:
+            live = any(a[k] and a[k]["in_use"] for k in ("camera", "microphone"))
+            self.cam_tree.insert("", "end", iid=a["id"], text=a["name"], tags=("live",) if live else (),
+                                 values=(when(a["camera"]), when(a["microphone"]),
+                                         "Trusted" if a["id"] in trusted else ""))
+        self.cam_tree.selection_set([i for i in sel if self.cam_tree.exists(i)])
+        set_empty(self.cam_tree, "No app has used your camera or microphone yet.")
+        now = privacy.in_use(rows)
+        if now:
+            names = {}
+            for a, k in now:
+                names.setdefault(a["name"], []).append(k)
+            text = "  ·  ".join(f"{n} is using your {' and '.join(ks)}" for n, ks in names.items())
+            self.cam_live.configure(text=text, fg=BAD)
+            self.cam_live_dot.configure(fg=BAD)
+        else:
+            self.cam_live.configure(text="Nothing is using your camera or microphone right now.", fg=TEXT)
+            self.cam_live_dot.configure(fg=OK)
+
+    def _cam_selected(self):
+        ids = set(self.cam_tree.selection())
+        return [a for a in self._cam_rows if a["id"] in ids]
+
+    def privacy_toggle_watch(self):
+        on = self.cam_watch.get()
+        self.settings["privacy"]["watch"] = on
+        write_json(SETTINGS_FILE, self.settings)
+        engine.log_event("privacy", "info", f"Camera & microphone alerts turned {'on' if on else 'off'}")
+        wanted = engine.monitor_wanted(self.settings)
+
+        def work():
+            err = engine.set_monitor(wanted) if on or not wanted else None
+            if err:
+                self.ui(messagebox.showwarning, "Kavacham", "Alerts are working now, but couldn't be set to start "
+                                                            f"when you sign in:\n\n{err}")
+            self.ui(self.refresh_privacy, True)
+        self.bg(work)
+
+    def privacy_trust(self, trust):
+        rows = self._cam_selected()
+        if not rows:
+            messagebox.showinfo("Kavacham", "Select an app in the list first.")
+            return
+        trusted = self.settings["privacy"]["trusted"]
+        for a in rows:
+            if trust and a["id"] not in trusted:
+                trusted.append(a["id"])
+            elif not trust and a["id"] in trusted:
+                trusted.remove(a["id"])
+        write_json(SETTINGS_FILE, self.settings)
+        self._show_cam(self._cam_rows)
+
+    def privacy_close_app(self):
+        rows = [a for a in self._cam_selected() if a["path"]]
+        if not rows:
+            messagebox.showinfo("Kavacham", "Select a desktop app in the list first.\n\nStore apps (like Camera) close "
+                                            "like any window; you can also block them in Camera settings.")
+            return
+        a = rows[0]
+        if not messagebox.askyesno("Kavacham", f"Close {a['name']} now?\n\n{a['path']}\n\nAnything unsaved in it is "
+                                               "lost. To stop it using the camera or microphone for good, switch it "
+                                               "off in Camera settings or Microphone settings."):
+            return
+
+        def work():
+            n = privacy.close_app(a["path"])
+            self.ui(messagebox.showinfo, "Kavacham", f"{a['name']} was closed." if n else
+                    f"{a['name']} isn't running, or Windows didn't let Kavacham close it.")
+        self.bg(work)
+
+    def refresh_privacy(self, force=False):
+        if self._priv_busy:
+            return
+        if self._priv and not force and time.time() - self._priv["time"] < 120:
+            return
+        self._priv_busy = True
+        self.priv_again.configure(state="disabled")
+        self.priv_when.configure(text="Checking…")
+
+        def work():
+            try:
+                self.ui(self._show_privacy, privacy.run_checks(self.settings["privacy"]["watch"]))
+            except Exception as e:
+                self.ui(lambda m=str(e): self.priv_when.configure(text=f"Couldn't check: {m}"))
+            finally:
+                self._priv_busy = False
+                self.ui(lambda: self.priv_again.configure(state="normal"))
+        self.bg(work)
+
+    def _show_privacy(self, result):
+        self._priv = result
+        score, checks = result["score"], result["checks"]
+        todo = [c for c in checks if c["status"] in ("bad", "warn")]
+        tone = "ok" if score >= 75 else "warn" if score >= 50 else "bad"
+        word = "Private" if score >= 90 else "Good" if score >= 75 else "Could be better" if score >= 50 else "Sharing a lot"
+        many = "s" if len(todo) != 1 else ""
+        self.priv_score.configure(text=str(score), fg=TONES[tone][0])
+        self.priv_badge.configure(text="●  " + word.upper(), fg=TONES[tone][0])
+        self.priv_title.configure(text=f"{word}, nothing to fix" if not todo else
+                                  f"{word}, {len(todo)} setting{many} to tighten")
+        self.priv_when.configure(text=security.checked_ago(result).capitalize())
+        self.priv_bar.set(score / 100, TONES[tone][0])
+        self._render_checks(self.priv_list, checks, privacy.FIXES, self.privacy_fix)
+
+    def privacy_fix(self, fix_id):
+        if fix_id == "watch":
+            self.cam_watch.set(True)
+            self.privacy_toggle_watch()
+            return
+
+        def work():
+            res = privacy.apply_fix(fix_id)
+            if res == "failed":
+                self.ui(messagebox.showwarning, "Kavacham", "That couldn't be changed. If Windows asked for "
+                                                            "permission, choose Yes and try again.")
+            elif res == "opened":
+                self.ui(messagebox.showinfo, "Kavacham", "Windows Settings opened. Change the setting there, then "
+                                                         "click Check again.")
+            self.ui(self.refresh_privacy, True)
         self.bg(work)
 
     # ---------------------------------------------------------- overview
@@ -2099,7 +2325,7 @@ class App(tk.Tk):
 
     def engine_toggle_realtime(self):
         self._save_engine_settings()
-        on = self.eng_vars["realtime"].get()
+        on = engine.monitor_wanted(self.settings)  # camera & microphone alerts also need the monitor
 
         def work():
             err = engine.set_monitor(on)
@@ -2301,7 +2527,7 @@ class App(tk.Tk):
     def _build_phone_storage(self, parent):
         cfg = self.settings["usb"].setdefault("storage", {"scope": "Whole phone", "large": "100 MB", "dup": "1 MB",
                                                            "hidden": False, "app_folders": False})
-        self._ps_serials, self.ps_busy, self._ps_cancel, self.ps_meta, self.ps_mode = {}, False, False, {}, None
+        self._ps_phones, self.ps_busy, self._ps_cancel, self.ps_meta, self.ps_mode = {}, False, False, {}, None
         opts = Card(parent, padding=18)
         opts.pack(fill="x")
         row1 = frame(opts)
@@ -2321,18 +2547,26 @@ class App(tk.Tk):
                 self.ps_phone_box = box
         row2 = frame(opts)
         row2.pack(fill="x", pady=(px(12), 0))
-        for key, text in (("hidden", "Include hidden folders"), ("app_folders", "Include app folders (Android/data)")):
+        for key, text in (("hidden", "Include hidden folders"), ("app_folders", "Include private app folders")):
             Toggle(row2, self.ps_vars[key], command=self._save_ps_settings).pack(side="left")
             label(row2, text, "small", MUTED).pack(side="left", padx=(px(8), px(22)))
         self.ps_stop = Button(row2, "Stop", self._ps_stop, "danger", icon="stop", height=32)
-        self.ps_buttons = [Button(row2, "Find duplicates", lambda: self.ps_find("dups"), "secondary", icon="copy",
+        self.ps_buttons = [Button(row2, "Phone bin", lambda: self.ps_find("bin"), "ghost", icon="undo", height=32),
+                           Button(row2, "Find junk", lambda: self.ps_find("junk"), "secondary", icon="clean",
+                                  height=32),
+                           Button(row2, "Find duplicates", lambda: self.ps_find("dups"), "secondary", icon="copy",
                                   height=32),
                            Button(row2, "Find large files", lambda: self.ps_find("large"), "primary", icon="search",
                                   height=32)]
         for b in self.ps_buttons:
             b.pack(side="right", padx=(px(8), 0))
-        label(opts, "Everything is checked on the phone: only file names and sizes come to this PC. Photos and videos "
-                    "are copied only when you choose 'Move to this PC'. Needs USB debugging.", "small", SUBTLE,
+        label(opts, "Works over the normal USB cable: unlock the phone and choose \"File transfer\". To find "
+                    "duplicates, files of the same size are copied to a temporary folder on this PC to compare, then "
+                    "deleted (with USB debugging on, they're compared on the phone). Nothing leaves this PC. 'Find "
+                    "junk' always looks in hidden and private app folders (Android/data); with USB debugging it also "
+                    f"finds leftovers of removed apps and can empty every app's private cache. Deleted files go to "
+                    f"the phone's Kavacham bin first: restore them from 'Phone bin' for {phonecare.KEEP_DAYS} days. "
+                    "Chat databases and backups are never deleted.", "small", SUBTLE,
               wraplength=px(860), justify="left").pack(anchor="w", pady=(px(12), 0))
         self.ps_bar = Bar(parent, height=4)
 
@@ -2342,13 +2576,21 @@ class App(tk.Tk):
                              tree_column=("FILE ON THE PHONE", 560))
         self.ps_tree.configure(selectmode="extended")
         self.ps_tree.tag_configure("group", font=F["body_b"], background=SURFACE_2)
+        self.ps_tree.tag_configure("protected", foreground=SUBTLE)
         self.ps_tree.bind("<<TreeviewSelect>>", lambda _e: self._ps_selection_changed())
-        set_empty(self.ps_tree, "Connect a phone with USB debugging, then find large files or duplicates.")
+        set_empty(self.ps_tree, "Plug in your phone, unlock it and choose \"File transfer\", then find large files "
+                                "or duplicates.")
         acts = frame(parent)
         acts.pack(fill="x", pady=(px(14), 0))
-        Button(acts, "Delete from phone", self.ps_delete, "danger", icon="clean").pack(side="right")
-        Button(acts, "Move to this PC", self.ps_move, "secondary", icon="download").pack(side="right", padx=px(10))
-        Button(acts, "Select extra copies", self.ps_select_extra, "secondary", icon="check").pack(side="right")
+        self.ps_delete_btn = Button(acts, "Delete from phone", self.ps_delete, "danger", icon="clean")
+        self.ps_delete_btn.pack(side="right")
+        self.ps_restore_btn = Button(acts, "Restore", self.ps_restore, "primary", icon="undo")
+        self.ps_move_btn = Button(acts, "Move to this PC", self.ps_move, "secondary", icon="download")
+        self.ps_move_btn.pack(side="right", padx=px(10))
+        self.ps_select_btn = Button(acts, "Select extra copies", self.ps_select_extra, "secondary", icon="check")
+        self.ps_select_btn.pack(side="right")
+        Button(acts, "Open", self.ps_open, "ghost", icon="open").pack(side="right", padx=(0, px(10)))
+        self.ps_bin = {}  # tree row -> bin item, in 'Phone bin' view
         self.ps_status = label(acts, "", "small", MUTED, wraplength=px(380), justify="left")
         self.ps_status.pack(side="left")
 
@@ -2357,29 +2599,36 @@ class App(tk.Tk):
             self.settings["usb"]["storage"][k] = self.ps_vars[k].get()
         write_json(SETTINGS_FILE, self.settings)
 
-    def _ps_set_phones(self, ready):
-        self._ps_serials = {}
+    def _ps_set_phones(self, ready, mtp):
+        """Phones to choose from: USB debugging ones first (faster duplicates), then plain File transfer ones."""
+        self._ps_phones = {}
         for d in ready:
             info = self._usb_info.get(d["serial"], {})
-            self._ps_serials[f"{info.get('maker', '')} {info.get('model') or d['model']}".strip()] = d["serial"]
-        self.ps_phone_box.configure(values=list(self._ps_serials))
-        if self.ps_vars["phone"].get() not in self._ps_serials:
-            self.ps_vars["phone"].set(next(iter(self._ps_serials), ""))
+            name = f"{info.get('maker', '')} {info.get('model') or d['model']}".strip()
+            how = "Wi-Fi" if phonecare.is_wifi(d["serial"]) else "USB debugging"
+            self._ps_phones[f"{name} ({how})"] = ("adb", d["serial"])
+        for name in mtp:
+            self._ps_phones[name] = ("mtp", name)
+        self.ps_phone_box.configure(values=list(self._ps_phones))
+        if self.ps_vars["phone"].get() not in self._ps_phones:
+            self.ps_vars["phone"].set(next(iter(self._ps_phones), ""))
 
-    def _ps_serial(self):
-        serial = self._ps_serials.get(self.ps_vars["phone"].get())
-        if not serial:
-            messagebox.showinfo("Kavacham", "Connect an Android phone with USB debugging switched on first.\n\n"
-                                            "The Security scan tab shows how to switch it on.")
-        return serial
+    def _ps_phone(self):
+        """("adb", serial) or ("mtp", device name) for the chosen phone."""
+        phone = self._ps_phones.get(self.ps_vars["phone"].get())
+        if not phone:
+            messagebox.showinfo("Kavacham", "Plug in your Android phone with a USB cable first.\n\nThen unlock it, pull "
+                                            "down the notifications, tap the USB notification and choose \"File "
+                                            "transfer\". The phone shows up here in a few seconds.")
+        return phone
 
     def _ps_stop(self):
         self._ps_cancel = True
         self.ps_status.configure(text="Stopping…")
 
     def ps_find(self, mode):
-        serial = self._ps_serial()
-        if not serial or self.ps_busy:
+        phone = self._ps_phone()
+        if not phone or self.ps_busy:
             return
         self.ps_busy, self._ps_cancel, self.ps_mode = True, False, mode
         for b in self.ps_buttons:
@@ -2389,26 +2638,49 @@ class App(tk.Tk):
         self.ps_bar.start()
         self.ps_tree.delete(*self.ps_tree.get_children())
         self.ps_meta.clear()
-        set_empty(self.ps_tree, "Searching the phone…")
+        self.ps_bin.clear()
+        self._ps_mode_buttons(mode)
+        set_empty(self.ps_tree, "Opening the phone's Kavacham bin…" if mode == "bin" else "Searching the phone…")
         v = {k: self.ps_vars[k].get() for k in self.ps_vars}
         self.ps_status.configure(text="Listing files on the phone…")
 
         def progress(stage, done, total):
-            text = "Listing files on the phone…" if stage == "listing" else \
-                f"Comparing contents on the phone… {done:,} of {total:,} possible matches"
+            if stage == "listing":
+                text = f"Listing files on the phone… {done:,} found" if phone[0] == "mtp" else \
+                    "Listing files on the phone…"
+            elif stage == "copying":
+                text = f"Comparing files of the same size… {done:,} of {total:,}"
+            else:
+                text = f"Comparing contents on the phone… {done:,} of {total:,} possible matches"
             self.ui(self.ps_status.configure, {"text": text})
 
         def work():
+            kind, ident = phone
+            cancelled = lambda: self._ps_cancel  # noqa: E731
             try:
-                if mode == "large":
-                    result = usb.phone_large_files(serial, v["scope"], usb.LARGE_SIZES[v["large"]], v["hidden"],
-                                                   v["app_folders"])
-                else:
-                    result = usb.phone_duplicates(serial, v["scope"], usb.DUP_SIZES[v["dup"]], v["hidden"],
-                                                  v["app_folders"], progress, lambda: self._ps_cancel)
+                with phonecare.awake(phone):
+                    result = find(kind, ident, cancelled)
                 self.ui(self._ps_done, mode, result, None)
             except Exception as e:
                 self.ui(self._ps_done, mode, [], str(e))
+
+        def find(kind, ident, cancelled):
+            if mode == "bin":
+                phonecare.purge(phone)  # older than KEEP_DAYS
+                return phonecare.bin_items(phone)
+            if mode == "large" and kind == "adb":
+                return usb.phone_large_files(ident, v["scope"], usb.LARGE_SIZES[v["large"]], v["hidden"],
+                                             v["app_folders"])
+            if mode == "large":
+                return usb.mtp_large_files(ident, v["scope"], usb.LARGE_SIZES[v["large"]], v["hidden"],
+                                           v["app_folders"], progress, cancelled)
+            if mode == "junk":
+                return (usb.phone_junk if kind == "adb" else usb.mtp_junk)(ident, progress, cancelled)
+            if kind == "adb":
+                return usb.phone_duplicates(ident, v["scope"], usb.DUP_SIZES[v["dup"]], v["hidden"],
+                                            v["app_folders"], progress, cancelled)
+            return usb.mtp_duplicates(ident, v["scope"], usb.DUP_SIZES[v["dup"]], v["hidden"], v["app_folders"],
+                                      progress, cancelled)
         self.bg(work)
 
     def _ps_done(self, mode, result, error):
@@ -2419,12 +2691,51 @@ class App(tk.Tk):
         for b in self.ps_buttons:
             b.configure(state="normal")
         fmt = lambda t: time.strftime("%d %b %Y %H:%M", time.localtime(t)) if t else ""  # noqa: E731
-        if mode == "large":
+
+        def add(parent, size, mtime, path):
+            safe = phonecare.is_protected(path)
+            iid = self.ps_tree.insert(parent, "end", text=path + ("   · kept safe: chat backup" if safe else ""),
+                                      values=(human(size), fmt(mtime)), tags=("protected",) if safe else ())
+            self.ps_meta[iid] = (size, path)
+        if mode == "bin":
+            stamps = {}
+            for item in result:
+                stamps.setdefault(item["stamp"], []).append(item)
+            for stamp, items in stamps.items():
+                when = items[0]["when"]
+                gone = fmt(when + phonecare.KEEP_DAYS * 86400).rsplit(" ", 1)[0] if when else "soon"
+                gid = self.ps_tree.insert("", "end", text=f"Deleted {fmt(when)} · {len(items)} file(s) · emptied "
+                                                          f"on {gone}", values=(human(sum(i["size"] for i in items)),
+                                                                                ""), open=True, tags=("group",))
+                for item in items:
+                    iid = self.ps_tree.insert(gid, "end", text=item["original"], values=(human(item["size"]),
+                                                                                         fmt(item["when"])))
+                    self.ps_meta[iid] = (item["size"], item["path"])
+                    self.ps_bin[iid] = item
+            total = sum(i["size"] for i in result)
+            summary = (f"{len(result):,} file(s) in the bin · {human(total)}. Select files to restore them, or to "
+                       "delete them for good and free the space now.") if result else \
+                "The phone's Kavacham bin is empty."
+        elif mode == "large":
             for size, mtime, path in result:
-                iid = self.ps_tree.insert("", "end", text=path, values=(human(size), fmt(mtime)))
-                self.ps_meta[iid] = (size, path)
+                add("", size, mtime, path)
             total = sum(s for s, _m, _p in result)
             summary = f"{len(result):,} large files · {human(total)} in total" if result else "No files that big."
+        elif mode == "junk":
+            picked, total = [], 0
+            for kind, default, items in result:
+                size = sum(s for s, _p in items)
+                total += size
+                gid = self.ps_tree.insert("", "end", text=f"{kind} · {len(items)} item(s)", values=(human(size), ""),
+                                          open=len(items) <= 12, tags=("group",))
+                for s, path in items:
+                    iid = self.ps_tree.insert(gid, "end", text=path, values=(human(s) if s else "size unknown", ""))
+                    self.ps_meta[iid] = (s, path)
+                    if default:
+                        picked.append(iid)
+            self.ps_tree.selection_set(picked)
+            summary = (f"{human(total)} of junk found. The safe items are selected; app installers (.apk) aren't, in "
+                       "case you still need them.") if result else "No junk found. The phone is tidy."
         else:
             wasted = 0
             for size, paths in result:
@@ -2433,14 +2744,15 @@ class App(tk.Tk):
                                           values=(human(size * (len(paths) - 1)) + " extra", ""), open=True,
                                           tags=("group",))
                 for mtime, path in paths:
-                    iid = self.ps_tree.insert(gid, "end", text=path, values=(human(size), fmt(mtime)))
-                    self.ps_meta[iid] = (size, path)
+                    add(gid, size, mtime, path)
             summary = (f"{len(result):,} sets of duplicates · {human(wasted)} can be freed. 'Select extra copies' "
                        "keeps the oldest of each.") if result else "No duplicates found."
         if error:
-            summary = f"Couldn't finish: {error[:140]}"
+            summary = f"Couldn't finish: {error[:220]}"
         elif self._ps_cancel:
             summary = "Stopped. " + summary
+        self.ps_select_btn.text = "Select safe junk" if mode == "junk" else "Select extra copies"
+        self.ps_select_btn._draw()
         set_empty(self.ps_tree, summary if not result else "")
         self.ps_status.configure(text=summary)
 
@@ -2453,32 +2765,103 @@ class App(tk.Tk):
             self.ps_status.configure(text=f"{len(sel)} selected · {human(sum(s for _i, s, _p in sel))}")
 
     def ps_select_extra(self):
+        if self.ps_mode == "junk":
+            safe = {k for k, default in usb.JUNK_KINDS if default}
+            self.ps_tree.selection_set([c for gid in self.ps_tree.get_children()
+                                        if self.ps_tree.item(gid, "text").split(" · ")[0] in safe
+                                        for c in self.ps_tree.get_children(gid)])
+            return
         if self.ps_mode != "dups":
             return
         extra = []
         for gid in self.ps_tree.get_children():
-            extra += list(self.ps_tree.get_children(gid))[1:]  # children are sorted oldest first
+            extra += [c for c in list(self.ps_tree.get_children(gid))[1:]  # children are sorted oldest first
+                      if not phonecare.is_protected(self.ps_meta[c][1])]
         self.ps_tree.selection_set(extra)
 
-    def _ps_apply(self, rows, action, done_text):
-        serial = self._ps_serial()
-        if not serial:
+    def _ps_mode_buttons(self, mode):
+        """The bin view has Restore and 'Delete forever' instead of moving and picking copies."""
+        in_bin = mode == "bin"
+        self.ps_delete_btn.text = "Delete forever" if in_bin else "Delete from phone"
+        self.ps_delete_btn._draw()
+        if in_bin:
+            self.ps_move_btn.pack_forget()
+            self.ps_select_btn.pack_forget()
+            self.ps_restore_btn.pack(side="right", padx=px(10), after=self.ps_delete_btn)
+        elif not self.ps_move_btn.winfo_manager():
+            self.ps_restore_btn.pack_forget()
+            self.ps_move_btn.pack(side="right", padx=px(10), after=self.ps_delete_btn)
+            self.ps_select_btn.pack(side="right", after=self.ps_move_btn)
+
+    def _ps_unprotected(self, rows):
+        """Drop chat databases and backups from rows, saying so."""
+        keep = [r for r in rows if not phonecare.is_protected(r[2])]
+        if len(keep) < len(rows):
+            messagebox.showinfo("Kavacham", f"{len(rows) - len(keep)} selected file(s) are chat databases or backups "
+                                            "(e.g. WhatsApp/Databases). Kavacham keeps those safe and leaves them "
+                                            "out." + ("" if keep else "\n\nNothing else was selected."))
+        return keep
+
+    def _ps_apply(self, rows, adb_action, mtp_action, done_text, batch=None):
+        """adb_action(serial, path) -> bool, one file at a time; mtp_action(device, rows) -> paths done, all at once;
+        or batch(phone, rows) -> paths done, for either kind. done_text gets {ok}, {failed} and {size} (freed/moved)."""
+        phone = self._ps_phone()
+        if not phone or self.ps_busy:
             return
+        self.ps_busy = True  # the list mustn't be replaced while files are being worked on
+        for b in self.ps_buttons:
+            b.configure(state="disabled")
+        self.ps_status.configure(text=f"Working on {len(rows)} file(s)… keep the phone unlocked.")
+
+        def finished(text):
+            self.ps_busy = False
+            for b in self.ps_buttons:
+                b.configure(state="normal")
+            self.ps_status.configure(text=text)
 
         def work():
-            ok = 0
-            for iid, _size, path in rows:
-                if action(serial, path):
-                    ok += 1
-                    self.ui(self.ps_tree.delete, iid)
+            kind, ident = phone
+            try:
+                with phonecare.awake(phone):
+                    if batch:
+                        done = set(batch(phone, rows))
+                    elif kind == "adb":
+                        done = {p for _i, _s, p in rows if adb_action(ident, p)}
+                    else:
+                        done = set(mtp_action(ident, rows))
+                size = human(sum(s for _i, s, p in rows if p in done))
+                text = done_text.format(ok=len(done), failed=len(rows) - len(done), size=size)
+                if len(done) == len(rows):
+                    text = re.sub(r" · 0 \w.*?(?= · |$)", "", text)  # no "· 0 couldn't be …"
+            except Exception as e:
+                done, text = set(), f"Couldn't finish: {str(e)[:200]}"
+            gone = [iid for iid, _size, path in rows if path in done]
+
+            def update():
+                for iid in gone:
+                    if self.ps_tree.exists(iid):
+                        self.ps_tree.delete(iid)
                     self.ps_meta.pop(iid, None)
-            self.ui(self.ps_status.configure, {"text": done_text.format(ok=ok, failed=len(rows) - ok)})
+                    self.ps_bin.pop(iid, None)
+                self.ps_tree.delete(*[g for g in self.ps_tree.get_children()
+                                      if g not in self.ps_meta and not self.ps_tree.get_children(g)])
+                finished(text)
+            self.ui(update)
         self.bg(work)
 
-    def ps_move(self):
+    def _ps_need_selection(self):
+        if self.ps_busy:
+            messagebox.showinfo("Kavacham", "Kavacham is still working on the phone. Wait for it to finish.")
+            return []
         rows = self._ps_selected()
         if not rows:
             messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
+        return rows
+
+    def ps_move(self):
+        rows = self._ps_need_selection()
+        rows = rows and self._ps_unprotected(rows)
+        if not rows:
             return
         name = re.sub(r'[\\/:*?"<>|]', "_", self.ps_vars["phone"].get() or "Phone")
         dest = os.path.join(os.path.expanduser("~"), "Pictures", "From phone", name)
@@ -2487,21 +2870,85 @@ class App(tk.Tk):
                                                "from the phone only after its copy on the PC is checked complete."):
             return
         self._ps_apply(rows, lambda serial, path: usb.move_to_pc(serial, path, dest),
-                       "{ok} file(s) moved to Pictures\\From phone" + " · {failed} couldn't be moved")
+                       lambda device, rows: usb.mtp_move_to_pc(device, [(p, s) for _i, s, p in rows], dest),
+                       "{ok} file(s) moved to Pictures\\From phone ({size})" + " · {failed} couldn't be moved")
 
     def ps_delete(self):
-        rows = self._ps_selected()
+        rows = self._ps_need_selection()
         if not rows:
-            messagebox.showinfo("Kavacham", "Select one or more files in the list first.")
+            return
+        total = human(sum(s for _i, s, _p in rows))
+        if self.ps_mode == "bin":
+            if not messagebox.askyesno("Kavacham", f"Delete {len(rows)} file(s) ({total}) for good?\n\nThis frees the "
+                                                   "space on the phone now. They can't be restored after this."):
+                return
+            self._ps_apply(rows, None, None, "{ok} file(s) deleted for good · {size} freed · {failed} couldn't be "
+                                             "deleted",
+                           batch=lambda phone, rows: phonecare.empty(phone, [self.ps_bin[i] for i, _s, _p in rows]))
             return
         names = "\n".join(f"•  {os.path.basename(p)}" for _i, _s, p in rows[:10])
         more = f"\n…and {len(rows) - 10} more" if len(rows) > 10 else ""
-        if not messagebox.askyesno("Kavacham", f"Permanently delete {len(rows)} file(s) "
-                                               f"({human(sum(s for _i, s, _p in rows))}) from the phone?\n\n{names}{more}"
-                                               "\n\nThis can't be undone: they don't go to the phone's trash. "
-                                               "Use 'Move to this PC' to keep a copy."):
+        if self.ps_mode == "junk":
+            if not messagebox.askyesno("Kavacham", f"Clean {len(rows)} junk item(s) ({total}) from the phone?\n\n"
+                                                   f"{names}{more}\n\nCaches and thumbnails are rebuilt by the apps "
+                                                   "when needed. Your photos, chats and documents aren't touched."):
+                return
+            self._ps_apply(rows, usb.clean_junk_adb,
+                           lambda device, rows: usb.clean_junk_mtp(device, [p for _i, _s, p in rows]),
+                           "{ok} junk item(s) cleaned · {failed} couldn't be cleaned")
             return
-        self._ps_apply(rows, usb.adb_delete, "{ok} file(s) deleted from the phone · {failed} couldn't be deleted")
+        rows = self._ps_unprotected(rows)
+        if not rows:
+            return
+        total = human(sum(s for _i, s, _p in rows))
+        names = "\n".join(f"•  {os.path.basename(p)}" for _i, _s, p in rows[:10])
+        more = f"\n…and {len(rows) - 10} more" if len(rows) > 10 else ""
+        days = phonecare.KEEP_DAYS
+        if not messagebox.askyesno("Kavacham", f"Delete {len(rows)} file(s) ({total}) from the phone?\n\n{names}{more}"
+                                               f"\n\nThey go to the phone's Kavacham bin first: you can restore them "
+                                               f"from 'Phone bin' for {days} days, then they're deleted for good. To "
+                                               "free the space right away, open 'Phone bin' and choose 'Delete "
+                                               "forever'."):
+            return
+
+        def to_bin(phone, rows):
+            moved = phonecare.to_bin(phone, [p for _i, _s, p in rows])
+            try:
+                phonecare.purge(phone)  # what's been there longer than KEEP_DAYS
+            except Exception:
+                pass
+            return moved
+        self._ps_apply(rows, None, None, "{ok} file(s) moved to the phone's Kavacham bin ({size}). Restore them from "
+                                         f"'Phone bin' within {days} days · " + "{failed} couldn't be moved",
+                       batch=to_bin)
+
+    def ps_restore(self):
+        rows = self._ps_need_selection()
+        if not rows or self.ps_mode != "bin":
+            return
+        self._ps_apply(rows, None, None, "{ok} file(s) put back where they were · {failed} couldn't be restored",
+                       batch=lambda phone, rows: phonecare.restore(phone, [self.ps_bin[i] for i, _s, _p in rows]))
+
+    def ps_open(self):
+        """Look at a file before deciding: it's copied to a temporary folder on this PC and opened there."""
+        rows = self._ps_need_selection()
+        phone = rows and self._ps_phone()
+        if not phone:
+            return
+        _iid, size, path = rows[0]
+        self.ps_status.configure(text=f"Copying {os.path.basename(path)} ({human(size)}) to open it…")
+
+        def work():
+            try:
+                local = phonecare.preview(phone, path)
+            except Exception:
+                local = None
+            if local:
+                os.startfile(local)
+                self.ui(self.ps_status.configure, {"text": f"Opened {os.path.basename(path)} (a temporary copy)."})
+            else:
+                self.ui(self.ps_status.configure, {"text": "Couldn't copy that file. Unlock the phone and try again."})
+        self.bg(work)
 
     def _save_usb_settings(self):
         self.settings["usb"]["auto_scan"] = self.usb_auto.get()
@@ -2528,20 +2975,25 @@ class App(tk.Tk):
     def refresh_usb(self):
         self._usb_listed = time.time()
 
+        busy = self.usb_busy or self.ps_busy
+
         def work():
             drives = usb.usb_drives()
-            mtp = usb.phones()
-            adb_devs = usb.adb_devices()
-            for d in adb_devs:
-                if d["state"] == "device" and d["serial"] not in self._usb_info:
+            status = phonecare.connection_status(check_files=not busy)  # don't interrupt a phone that's being read
+            for d in status["adb"]:
+                if d["state"] != "device":
+                    continue
+                if d["serial"] not in self._usb_info:
                     try:
                         self._usb_info[d["serial"]] = usb.phone_info(d["serial"])
                     except Exception:
                         pass
-            self.ui(self._show_usb_devices, drives, mtp, adb_devs)
+                if not busy:
+                    phonecare.restore_awake(d["serial"])
+            self.ui(self._show_usb_devices, drives, status)
         self.bg(work)
 
-    def _show_usb_devices(self, drives, mtp, adb_devs):
+    def _show_usb_devices(self, drives, status):
         for w in self.usb_list.winfo_children():
             w.destroy()
 
@@ -2568,36 +3020,60 @@ class App(tk.Tk):
                 [("Scan", lambda r=d["root"]: self.usb_scan_drive(r), "primary"),
                  ("Repair", lambda r=d["root"]: self.usb_repair(r), "secondary")], n == 0)
             n += 1
+        adb_devs = status["adb"]
         ready = [d for d in adb_devs if d["state"] == "device"]
-        self._ps_set_phones(ready)
+        waiting = [d for d in adb_devs if d["state"] != "device"]
+        self._ps_set_phones(ready, status["files"])
         for d in adb_devs:
             info = self._usb_info.get(d["serial"], {})
             if d["state"] == "device":
                 title = f"{info.get('maker', '')} {info.get('model') or d['model']}".strip() + " · apps"
-                sub = (f"Android {info.get('android', '?')} · security patch {info.get('patch', '?')} · "
-                       "connected with USB debugging")
+                sub = (f"Android {info.get('android', '?')} · security patch {info.get('patch', '?')} · connected "
+                       + ("over Wi-Fi" if phonecare.is_wifi(d["serial"]) else "with USB debugging") +
+                       " · kept awake during scans")
                 row("shield", title, sub, [("Check installed apps", lambda s=d["serial"]: self.usb_check_apps(s),
                                             "primary"),
                                            ("Deep scan storage", lambda s=d["serial"]: self.usb_deep_scan(s),
                                             "secondary")], n == 0)
+            elif d["state"] == "unauthorized":
+                row("warning", d["model"] or "Phone waiting for permission", "Unlock the phone and tap Allow on "
+                    "\"Allow USB debugging?\" (tick \"Always allow from this computer\"). No box? Unplug the cable "
+                    "and plug it in again.", [("Refresh", self.refresh_usb, "secondary")], n == 0)
             else:
-                row("warning", d["model"] or d["serial"], "Unlock the phone and tap Allow on \"Allow USB debugging?\" "
-                    "(tick \"Always allow from this computer\").", [("Refresh", self.refresh_usb, "secondary")], n == 0)
+                row("warning", d["model"] or d["serial"], "The phone isn't answering over USB debugging. Unplug the "
+                    "cable, plug it in again and unlock the phone.", [("Refresh", self.refresh_usb, "secondary")],
+                    n == 0)
             n += 1
-        for name in mtp:
-            row("file", f"{name} · files", "Files over USB. If nothing is found, unlock the phone and choose \"File "
-                "transfer\" in its USB notification.", [("Scan phone files", lambda m=name: self.usb_scan_phone(m),
-                                                         "primary")], n == 0)
+        for name in status["driver"]:
+            row("warning", "USB debugging needs a driver", f"Windows found the phone's debugging connection ({name}) "
+                "but has no driver for it. Kavacham can install Google's free USB driver (about 8 MB, from "
+                "dl.google.com; Windows asks for permission).",
+                [("Install driver", self.usb_install_driver, "primary")], n == 0)
             n += 1
-        if mtp and not ready:
-            row("bolt", "Check installed apps too",
-                "Switch on USB debugging once: Settings → About phone → tap Build number 7 times → back to Settings → "
-                "System → Developer options → USB debugging. Then tap Allow on the phone.",
-                [("Set up", self.usb_setup_adb, "secondary")], False)
+        for name in status["files"]:
+            row("file", f"{name} · files", "Files over USB (File transfer).",
+                [("Scan phone files", lambda m=name: self.usb_scan_phone(m), "primary")], n == 0)
+            n += 1
+        for name in status["hidden"]:
+            row("warning", f"{name} · files hidden", "Connected, but the phone isn't sharing its files. Unlock it, tap "
+                "the USB notification and choose \"File transfer\". Still nothing? Unplug the cable and plug it in "
+                "again.", [("Refresh", self.refresh_usb, "secondary")], n == 0)
+            n += 1
+        if (status["files"] or status["hidden"]) and not ready and not waiting and not status["driver"]:
+            row("bolt", "Make phone scans much faster: turn on USB debugging",
+                "File transfer reads one file at a time and phones often drop it during long scans. With USB debugging "
+                "the phone searches itself, stays awake while Kavacham works, and installed apps can be checked. "
+                "Once: Settings → About phone → tap Build number (on Xiaomi: MIUI version) 7 times → Developer "
+                "options (in System, or Additional settings on Xiaomi) → USB debugging on. Then plug the cable in "
+                "again and tap Allow on the phone.",
+                [("Set up", self.usb_setup_adb, "secondary"), ("Use Wi-Fi", self.usb_wifi_dialog, "ghost")], n == 0)
             n += 1
         if not n:
             label(self.usb_list, "Plug in a pendrive, USB disk or Android phone with a USB cable. Phones: unlock the "
                                  "screen and choose \"File transfer\".", "body", MUTED).pack(anchor="w")
+            if status["tools"]:
+                Button(self.usb_list, "Connect a phone over Wi-Fi", self.usb_wifi_dialog, "ghost", icon="wifi",
+                       height=30).pack(anchor="w", pady=(px(8), 0))
 
     # ---- running scans
     def _usb_run(self, title, fn):
@@ -2694,7 +3170,8 @@ class App(tk.Tk):
 
     def usb_check_apps(self, serial):
         def fn(progress, cancelled):
-            hits, n, info = usb.check_apps(serial, progress, cancelled)
+            with phonecare.awake(("adb", serial)):
+                hits, n, info = usb.check_apps(serial, progress, cancelled)
             return hits, f"{n} installed apps checked · Android {info['android']}, patch {info['patch']}"
         self._usb_run("Checking installed apps", fn)
 
@@ -2717,15 +3194,18 @@ class App(tk.Tk):
             engine.log_event("usb", "info", "Deep scan permission given", f"phone {serial}")
 
         def fn(progress, cancelled):
-            hits, n, name = usb.deep_scan_storage(serial, progress, cancelled)
+            with phonecare.awake(("adb", serial)):
+                hits, n, name = usb.deep_scan_storage(serial, progress, cancelled)
             return hits, f"{n:,} risky-type files fingerprinted on {name}, including app and hidden folders"
         self._usb_run("Deep scanning phone storage", fn)
 
     def usb_setup_adb(self):
         if usb.adb_path():
-            messagebox.showinfo("Kavacham", "Android tools are ready.\n\nOn the phone: Settings → About phone → tap "
-                                            "Build number 7 times. Then Settings → System → Developer options → turn "
-                                            "on USB debugging, and tap Allow when the phone asks.")
+            messagebox.showinfo("Kavacham", "Android tools are ready. On the phone:\n\n1.  Settings → About phone → "
+                                            "tap Build number 7 times (on Xiaomi: tap MIUI version).\n2.  Developer "
+                                            "options (in Settings → System, or Additional settings on Xiaomi) → turn "
+                                            "on USB debugging.\n3.  Unplug the cable, plug it in again, unlock the "
+                                            "phone and tap Allow (tick \"Always allow from this computer\").")
             self.refresh_usb()
             return
         if not messagebox.askyesno("Kavacham", "Checking installed apps needs Google's free Android tools (adb, about "
@@ -2736,6 +3216,63 @@ class App(tk.Tk):
             usb.setup_adb(lambda t: progress(0, t, 0))
             return [], "Android tools installed. Now switch on USB debugging on the phone and tap Allow."
         self._usb_run("Installing Android tools", fn)
+
+    def usb_install_driver(self):
+        def fn(progress, cancelled):
+            ok = phonecare.install_driver(lambda t: progress(0, t, 0))
+            if not ok:
+                raise RuntimeError("The driver wasn't installed (permission was declined, or Windows refused it).")
+            return [], "USB driver installed. Unplug the phone, plug it in again and tap Allow on the phone."
+        self._usb_run("Installing the USB driver", fn)
+
+    def usb_wifi_dialog(self):
+        """Wireless debugging (Android 11+): pair once with a code, after that the phone connects over Wi-Fi."""
+        if not usb.adb_path():
+            self.usb_setup_adb()
+            return
+        win = tk.Toplevel(self, bg=SURFACE, padx=px(26), pady=px(22))
+        win.title("Connect a phone over Wi-Fi")
+        win.transient(self)
+        dark_titlebar(win)
+        wrap = px(520)
+        label(win, "Connect a phone over Wi-Fi", "h2").pack(anchor="w")
+        label(win, "Needs Android 11 or newer, with the phone and this PC on the same Wi-Fi.\n\n1.  On the phone: "
+                   "Developer options → Wireless debugging → turn it on.\n2.  Tap \"Pair device with pairing code\" "
+                   "and type what it shows here:", "body", MUTED, wraplength=wrap, justify="left").pack(
+            anchor="w", pady=(px(6), px(10)))
+        fields = {}
+        for key, text, hint in (("pair", "IP address & port", "e.g. 192.168.1.5:37099"),
+                                ("code", "Wi-Fi pairing code", "6 digits")):
+            r = frame(win, bg=SURFACE)
+            r.pack(fill="x", pady=px(3))
+            label(r, text, "small_b", MUTED, width=18, anchor="w").pack(side="left")
+            fields[key] = tk.StringVar()
+            ttk.Entry(r, textvariable=fields[key], font=F["body"], width=24).pack(side="left")
+            label(r, hint, "small", SUBTLE).pack(side="left", padx=px(8))
+        status = label(win, "", "small", MUTED, wraplength=wrap, justify="left")
+
+        def run(fn, *args):
+            status.configure(text="Working…", fg=MUTED)
+
+            def work():
+                ok, msg = fn(*args)
+                self.ui(status.configure, {"text": msg, "fg": TONES["ok" if ok else "warn"][0]})
+                if ok:
+                    self.ui(self.refresh_usb)
+                    self.ui(lambda: self.after(1500, win.destroy))
+            self.bg(work)
+        Button(win, "Pair and connect", lambda: run(phonecare.wifi_pair, fields["pair"].get(), fields["code"].get()),
+               "primary", icon="wifi").pack(anchor="w", pady=(px(10), px(16)))
+        label(win, "Already paired? Type the IP address & port shown at the top of the Wireless debugging screen:",
+              "body", MUTED, wraplength=wrap, justify="left").pack(anchor="w")
+        r = frame(win, bg=SURFACE)
+        r.pack(fill="x", pady=px(6))
+        fields["connect"] = tk.StringVar()
+        ttk.Entry(r, textvariable=fields["connect"], font=F["body"], width=24).pack(side="left")
+        Button(r, "Connect", lambda: run(phonecare.wifi_connect, fields["connect"].get()), "secondary",
+               height=32).pack(side="left", padx=px(10))
+        status.pack(anchor="w", pady=(px(8), 0))
+        Button(win, "Close", win.destroy, "ghost").pack(anchor="e", pady=(px(12), 0))
 
     # ---- result actions
     def _usb_selected(self):

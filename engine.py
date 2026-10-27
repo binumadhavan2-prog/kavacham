@@ -793,24 +793,48 @@ def monitor_running():
         return False
 
 
+def monitor_wanted(settings=None):
+    """The background monitor runs while real-time protection or camera & microphone alerts are on."""
+    settings = settings or load_settings()
+    return bool(settings["engine"]["realtime"] or settings["privacy"]["watch"])
+
+
+def monitor_task_exists():
+    return bool(run_ps(f"Get-ScheduledTask -TaskName {ps_quote(MONITOR_TASK)} -ErrorAction SilentlyContinue | "
+                       "% { 'yes' }", timeout=60).stdout.strip())
+
+
 def run_monitor():
-    """Background process: watch folders, scan new or changed files once they stop growing, update the feeds."""
+    """Background process: watch folders, scan new or changed files once they stop growing, watch the camera and
+    microphone, update the feeds."""
     if monitor_running():
         return
-    log_event("monitor", "ok", "Real-time monitoring started")
+    log_event("monitor", "ok", "Background monitor started")
     seen, settling, last_cfg, last_update_try, last_alerts = {}, {}, 0, 0, 0
+    import privacy
     import usb
     usb_watch = usb.Watcher()
-    folders, cfg = [], {}
+    cam_watch = None
+    folders, cfg, priv = [], {}, {}
     while True:
         if time.time() - last_cfg > 10:
-            cfg = load_settings()["engine"]
-            if not cfg["realtime"]:
+            settings = load_settings()
+            cfg, priv = settings["engine"], settings["privacy"]
+            if not monitor_wanted(settings):
                 break
-            if cfg["folders"] != folders:
-                folders = [f for f in cfg["folders"] if os.path.isdir(f)]
+            want = [f for f in cfg["folders"] if os.path.isdir(f)] if cfg["realtime"] else []
+            if want != folders:
+                folders = want
                 seen = {p: _sig(p) for p in walk(folders, max_depth=3)}  # baseline: only react to new changes
             last_cfg = time.time()
+        if priv.get("watch"):
+            try:
+                cam_watch = cam_watch or privacy.Watcher()
+                cam_watch.step(priv.get("trusted", []))
+            except Exception as ex:
+                log_event("privacy", "warn", "Camera & microphone watch error", str(ex)[:200])
+        else:
+            cam_watch = None  # switched back on later: don't alert for what was already on
         try:
             usb_watch.step(on_new=lambda root: threading.Thread(target=usb.auto_scan, args=(root,), daemon=True).start()
                            if load_settings()["usb"]["auto_scan"] else None)
@@ -842,7 +866,7 @@ def run_monitor():
         with open(MONITOR_BEAT, "w") as f:
             f.write(str(os.getpid()))
         time.sleep(3)
-    log_event("monitor", "info", "Real-time monitoring stopped")
+    log_event("monitor", "info", "Background monitor stopped")
     try:
         os.remove(MONITOR_BEAT)
     except OSError:
@@ -897,7 +921,7 @@ def set_monitor(enabled):
     name = ps_quote(MONITOR_TASK)
     if not enabled:
         run_ps(f"Unregister-ScheduledTask -TaskName {name} -Confirm:$false -ErrorAction SilentlyContinue")
-        log_event("engine", "info", "Real-time monitoring turned off")
+        log_event("engine", "info", "Background monitor turned off")
         return None
     user = '"$env:USERDOMAIN\\$env:USERNAME"'
     script = f"""
@@ -914,7 +938,7 @@ Register-ScheduledTask -TaskName {name} -Action $a -Trigger $t -Settings $s -Pri
         lines = out.stderr.strip().splitlines()
         err = next((l for l in lines if l.strip() and not l.startswith(("At line", "+", "#<"))), "Unknown error")
     start_monitor()
-    log_event("engine", "ok", "Real-time monitoring turned on", ", ".join(load_settings()["engine"]["folders"]))
+    log_event("engine", "ok", "Background monitor turned on")
     return err
 
 

@@ -6,7 +6,9 @@ your folders behind fake shortcuts). Phones are checked two ways:
 - installed apps over ADB, when USB debugging is on: hashes, known stalkerware, and risky access such as
   accessibility control or device admin by apps that didn't come from an app store
 """
+import base64
 import ctypes
+import hashlib
 import io
 import json
 import os
@@ -246,15 +248,115 @@ function Real-Name($it) {
   $n = [string]$it.ExtendedProperty('System.FileName')
   if ($n) { $n } else { [string]$it.Name }
 }
-function Find-Item($path) {
-  $cur = $dev
+function Find-Item($path, $cur = $dev) {
   foreach ($seg in ($path -split '/')) {
-    $cur = @($cur.GetFolder.Items() | ? { (Real-Name $_) -eq $seg -or $_.Name -eq $seg })[0]
     if (-not $cur) { return $null }
+    $cur = @($cur.GetFolder.Items() | ? { (Real-Name $_) -eq $seg -or $_.Name -eq $seg })[0]
   }
   return $cur
 }
 """
+
+# Windows' own file operation engine (IFileOperation): unlike Folder.CopyHere it waits until the copy is done, and it
+# deletes without a confirmation box per file. Phones have no recycle bin, so a delete is permanent either way.
+_PS_FILEOP = r"""
+try {
+Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PcgFileOp {
+  [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IShellItem { }
+  [ComImport, Guid("947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IFileOperation {
+    uint Advise(IntPtr sink); void Unadvise(uint cookie); void SetOperationFlags(uint flags);
+    void SetProgressMessage([MarshalAs(UnmanagedType.LPWStr)] string msg); void SetProgressDialog(IntPtr dlg);
+    void SetProperties(IntPtr props); void SetOwnerWindow(IntPtr hwnd); void ApplyPropertiesToItem(IShellItem item);
+    void ApplyPropertiesToItems([MarshalAs(UnmanagedType.IUnknown)] object items);
+    void RenameItem(IShellItem item, [MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr sink);
+    void RenameItems([MarshalAs(UnmanagedType.IUnknown)] object items, [MarshalAs(UnmanagedType.LPWStr)] string name);
+    void MoveItem(IShellItem item, IShellItem dest, [MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr sink);
+    void MoveItems([MarshalAs(UnmanagedType.IUnknown)] object items, IShellItem dest);
+    void CopyItem(IShellItem item, IShellItem dest, [MarshalAs(UnmanagedType.LPWStr)] string name, IntPtr sink);
+    void CopyItems([MarshalAs(UnmanagedType.IUnknown)] object items, IShellItem dest);
+    void DeleteItem(IShellItem item, IntPtr sink);
+    void DeleteItems([MarshalAs(UnmanagedType.IUnknown)] object items);
+    void NewItem(IShellItem dest, uint attrs, [MarshalAs(UnmanagedType.LPWStr)] string name,
+                 [MarshalAs(UnmanagedType.LPWStr)] string template, IntPtr sink);
+    void PerformOperations();
+    [return: MarshalAs(UnmanagedType.Bool)] bool GetAnyOperationsAborted();
+  }
+  [DllImport("shell32.dll", PreserveSig = false)]
+  static extern void SHGetIDListFromObject([MarshalAs(UnmanagedType.IUnknown)] object obj, out IntPtr pidl);
+  [DllImport("shell32.dll", PreserveSig = false)]
+  static extern void SHCreateItemFromIDList(IntPtr pidl, [In] ref Guid riid, out IShellItem item);
+  [DllImport("ole32.dll")] static extern void CoTaskMemFree(IntPtr p);
+  static IShellItem Item(object folderItem) {
+    IntPtr pidl; SHGetIDListFromObject(folderItem, out pidl);
+    try { Guid g = typeof(IShellItem).GUID; IShellItem it; SHCreateItemFromIDList(pidl, ref g, out it); return it; }
+    finally { CoTaskMemFree(pidl); }
+  }
+  static IFileOperation Op() {
+    var op = (IFileOperation)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("3ad05575-8857-4850-9277-11b85bdb8e09")));
+    op.SetOperationFlags(0x0614);  // no confirmation, no progress window, no error dialogs
+    return op;
+  }
+  public static void Copy(object folderItem, object destFolderItem) {
+    var op = Op(); op.CopyItem(Item(folderItem), Item(destFolderItem), null, IntPtr.Zero); op.PerformOperations();
+  }
+  public static void Delete(object folderItem) {
+    var op = Op(); op.DeleteItem(Item(folderItem), IntPtr.Zero); op.PerformOperations();
+  }
+  public static void Move(object folderItem, object destFolderItem, string newName) {
+    var op = Op(); op.MoveItem(Item(folderItem), Item(destFolderItem), newName, IntPtr.Zero); op.PerformOperations();
+  }
+  public static void NewFolder(object parentFolderItem, string name) {
+    var op = Op(); op.NewItem(Item(parentFolderItem), 0x10, name, null, IntPtr.Zero); op.PerformOperations();
+  }
+}
+'@
+$fileop = $true
+} catch { $fileop = $false }
+"""
+
+PHONE_NOT_READY = ("The phone is connected but its files aren't visible. Unlock the phone and choose \"File "
+                   "transfer\" in its USB notification.")
+PHONE_GONE = "The phone isn't connected any more. Check the cable, unlock the phone and choose \"File transfer\"."
+PHONE_SLOW = ("The phone stopped answering. Unlock it, keep the screen on, check \"File transfer\" is still chosen, "
+              "then try again.")
+
+
+def _ps(script, env=None, timeout=120):
+    """run_ps, but with UTF-8 output so phone file names in any language come through intact."""
+    script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false\n" \
+             + script
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+                             capture_output=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                             timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(PHONE_SLOW) from None
+    return out.stdout or ""
+
+
+def _ps_lines(script, env, cancelled=lambda: False):
+    """Run a PowerShell script and yield its output lines as they come; stops it when cancelled."""
+    script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false\n" \
+             + script
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    p = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                         encoding="utf-8", errors="replace", creationflags=NO_WINDOW, env=env)
+    try:
+        for line in p.stdout:
+            if cancelled():
+                break
+            yield line.rstrip("\r\n")
+    finally:
+        if p.poll() is None:
+            p.kill()
+        p.wait()
 
 
 def phones():
@@ -263,13 +365,30 @@ def phones():
               "? { $_.IsFolder -and -not $_.IsFileSystem } | % { [string]$_.Name }); ConvertTo-Json -InputObject $r "
               "-Compress")
     try:
-        return json.loads(run_ps(script, timeout=30).stdout or "[]") or []
+        return json.loads(_ps(script, timeout=30) or "[]") or []
     except Exception:
         return []
 
 
+def phone_storages(device):
+    """The phone's storages ("Internal shared storage", SD card). Raises a plain-language error when the phone has
+    gone, or shows up without any storage (locked, or set to "Charging only")."""
+    script = _PS_FIND + r"""
+if (-not $dev) { 'GONE'; exit }
+ConvertTo-Json -Compress -InputObject @($dev.GetFolder.Items() | ? { $_.IsFolder } | % { [string]$_.Name })
+"""
+    out = _ps(script, env={**os.environ, "PCG_DEVICE": device}, timeout=60).strip()
+    if out.startswith("GONE"):
+        raise RuntimeError(PHONE_GONE)
+    stores = json.loads(out or "[]") or []
+    if not stores:
+        raise RuntimeError(PHONE_NOT_READY)
+    return stores
+
+
 def phone_files(device):
     """Risky files in the places downloads and shared files land: [{"Path", "Size"}]."""
+    phone_storages(device)
     script = _PS_FIND + r"""
 $exts = $env:PCG_EXTS -split ','
 $focus = $env:PCG_FOCUS -split '\|'
@@ -293,8 +412,7 @@ ConvertTo-Json -InputObject @($found) -Compress
 """
     env = {**os.environ, "PCG_DEVICE": device, "PCG_EXTS": ",".join(sorted(PHONE_EXT)), "PCG_FOCUS": "|".join(PHONE_FOCUS),
            "PCG_SKIP": "|".join(PHONE_SKIP)}
-    out = run_ps(script, env=env, timeout=900)
-    return json.loads(out.stdout or "[]") or []
+    return json.loads(_ps(script, env=env, timeout=900) or "[]") or []
 
 
 def copy_from_phone(device, paths, dest):
@@ -302,7 +420,7 @@ def copy_from_phone(device, paths, dest):
     listing = os.path.join(dest, "_list.json")
     with open(listing, "w", encoding="utf-8") as f:
         json.dump(paths, f)
-    script = _PS_FIND + r"""
+    script = _PS_FIND + _PS_FILEOP + r"""
 $paths = Get-Content -Raw -Encoding UTF8 $env:PCG_LIST | ConvertFrom-Json
 $map = @{}
 $i = 0
@@ -312,40 +430,61 @@ foreach ($p in $paths) {
   if (-not $it) { continue }
   $dir = Join-Path $env:PCG_DEST $i
   New-Item -ItemType Directory -Force $dir | Out-Null
-  $sh.Namespace($dir).CopyHere($it, 0x614)
-  $target = $null
-  $t0 = Get-Date; $last = -1
-  while (((Get-Date) - $t0).TotalSeconds -lt 180) {
-    Start-Sleep -Milliseconds 400
-    $f = @(Get-ChildItem -LiteralPath $dir -File)[0]  # each file gets its own folder, so the only file is ours
-    if ($f) {
-      $target = $f.FullName
-      if ($f.Length -gt 0 -and $f.Length -eq $last) { break }
-      $last = $f.Length
+  $done = $false
+  if ($fileop) { try { [PcgFileOp]::Copy($it, $sh.Namespace($dir).Self); $done = $true } catch {} }
+  if (-not $done) {  # older way: CopyHere returns at once, so wait for the file to stop growing
+    $sh.Namespace($dir).CopyHere($it, 0x614)
+    $t0 = Get-Date; $last = -1
+    while (((Get-Date) - $t0).TotalSeconds -lt 180) {
+      Start-Sleep -Milliseconds 400
+      $f = @(Get-ChildItem -LiteralPath $dir -File)[0]
+      if ($f) { if ($f.Length -gt 0 -and $f.Length -eq $last) { break }; $last = $f.Length }
     }
   }
-  if ($target) { $map[$target] = $p }
+  $f = @(Get-ChildItem -LiteralPath $dir -File)[0]  # each file gets its own folder, so the only file is ours
+  if ($f) { $map[$f.FullName] = $p }
 }
 $map | ConvertTo-Json -Compress
 """
     env = {**os.environ, "PCG_DEVICE": device, "PCG_LIST": listing, "PCG_DEST": dest}
-    out = run_ps(script, env=env, timeout=3600)
-    return json.loads(out.stdout or "{}") or {}
+    out = _ps(script, env=env, timeout=3600).strip()
+    os.remove(listing)
+    return json.loads(out or "{}") or {}
+
+
+def delete_many_from_phone(device, paths):
+    """Delete files on the phone over the file connection. Returns the set of paths that are gone."""
+    if not paths:
+        return set()
+    listing = os.path.join(tempfile.gettempdir(), f"pcguard-del-{os.getpid()}.json")
+    with open(listing, "w", encoding="utf-8") as f:
+        json.dump(list(paths), f)
+    script = _PS_FIND + _PS_FILEOP + r"""
+$gone = New-Object System.Collections.ArrayList
+foreach ($p in (Get-Content -Raw -Encoding UTF8 $env:PCG_LIST | ConvertFrom-Json)) {
+  $it = Find-Item $p
+  if (-not $it) { continue }
+  if ($fileop) { try { [PcgFileOp]::Delete($it) } catch { $it.InvokeVerb('delete') } } else { $it.InvokeVerb('delete') }
+  if (-not (Find-Item $p)) { [void]$gone.Add($p) }
+}
+ConvertTo-Json -Compress -InputObject @($gone)
+"""
+    try:
+        out = _ps(script, env={**os.environ, "PCG_DEVICE": device, "PCG_LIST": listing},
+                  timeout=60 + 30 * len(paths)).strip()
+    finally:
+        os.remove(listing)
+    gone = set(json.loads(out or "[]") or [])
+    for p in paths:
+        ok = p in gone
+        engine.log_event("usb", "ok" if ok else "warn", f"{'Deleted' if ok else 'Could not delete'} on phone: "
+                                                         f"{os.path.basename(p)}", f"{device} · {p}")
+    return gone
 
 
 def delete_from_phone(device, path):
-    """Delete one file on the phone. Windows may ask for confirmation. Returns True when it's gone."""
-    script = _PS_FIND + r"""
-$it = Find-Item $env:PCG_PATH
-if (-not $it) { 'not-found'; exit }
-$it.InvokeVerb('delete'); Start-Sleep 2
-if (Find-Item $env:PCG_PATH) { 'still-there' } else { 'deleted' }
-"""
-    out = run_ps(script, env={**os.environ, "PCG_DEVICE": device, "PCG_PATH": path}, timeout=120)
-    ok = "deleted" in out.stdout
-    engine.log_event("usb", "ok" if ok else "warn", f"{'Deleted' if ok else 'Could not delete'} on phone: "
-                                                     f"{os.path.basename(path)}", f"{device} · {path}")
-    return ok
+    """Delete one file on the phone. Returns True when it's gone."""
+    return path in delete_many_from_phone(device, [path])
 
 
 def scan_phone_files(device, progress=lambda *a: None, cancelled=lambda: False):
@@ -733,7 +872,7 @@ def _scope_roots(serial, scope):
 
 def list_phone_files(serial, scope, min_kb, hidden=False, app_folders=False):
     """Files on the phone bigger than min_kb: [(size, mtime, path)]. Only names and sizes come to the PC."""
-    prune = []
+    prune = ["-name .KavachamBin"]  # files already deleted with Kavacham, see phone.py
     if not hidden:
         prune.append("-path '*/.*'")
     if not app_folders:
@@ -810,3 +949,258 @@ def move_to_pc(serial, path, dest_root):
     if not adb_delete(serial, path):
         return None
     return local
+
+
+# ---------------------------------------------------------------- the same, over the plain file connection (MTP)
+# No USB debugging needed: Windows' own phone connection is walked folder by folder. Paths look like
+# "Internal shared storage/DCIM/Camera/IMG_1.jpg".
+
+def mtp_list_files(device, scope, min_kb, hidden=False, app_folders=False, progress=lambda *a: None,
+                   cancelled=lambda: False):
+    """Files on the phone of at least min_kb: [(size, mtime, path)]."""
+    phone_storages(device)
+    script = _PS_FIND + r"""
+$min = [int64]$env:PCG_MIN
+$hidden = $env:PCG_HIDDEN -eq '1'
+$appf = $env:PCG_APPF -eq '1'
+function Walk($folder, $p) {
+  "D`t$p"
+  $items = $null
+  try { $items = $folder.GetFolder.Items() } catch {}
+  if ($null -eq $items) { "S`t$p"; return }
+  foreach ($it in $items) {
+    # Every property read can be a round trip to the phone, so ask only what each item needs: the shown name and
+    # the cheap Size first; the real file name, exact size and date only for files that pass the size filter.
+    $name = [string]$it.Name
+    if (-not $hidden -and $name.StartsWith('.')) { continue }
+    if ($it.IsFolder) {
+      if ($name -eq '.KavachamBin') { continue }  # files already deleted with Kavacham, see phone.py
+      $q = "$p/$name"
+      if (-not $appf -and $q -match '^[^/]+/Android/(data|obb)$') { continue }
+      Walk $it $q
+    } else {
+      $size = [int64]$it.Size
+      if ($size -lt $min -and $size -gt 0) { continue }  # Size tops out near 4 GB, so big files are re-checked below
+      $exact = [int64]$it.ExtendedProperty('System.Size')
+      if ($exact) { $size = $exact }
+      if ($size -ge $min) {
+        $q = "$p/$(Real-Name $it)"
+        $t = 0  # phones leave ModifyDate empty (1899); the real date is in System.DateModified
+        try { $t = ([DateTimeOffset]$it.ExtendedProperty('System.DateModified').ToUniversalTime()).ToUnixTimeSeconds() } catch {}
+        "F`t$size`t$t`t$q"
+      }
+    }
+  }
+}
+if (-not $dev) { "E`tgone"; exit }
+foreach ($s in @($dev.GetFolder.Items() | ? { $_.IsFolder })) {
+  foreach ($r in ($env:PCG_ROOTS -split '\|')) {
+    if ($r) { $f = Find-Item $r $s; if ($f) { Walk $f "$($s.Name)/$r" } } else { Walk $s $s.Name }
+  }
+}
+"END"
+"""
+    env = {**os.environ, "PCG_DEVICE": device, "PCG_MIN": str(max(1, int(min_kb)) * 1024),
+           "PCG_HIDDEN": "1" if hidden else "0", "PCG_APPF": "1" if app_folders else "0",
+           "PCG_ROOTS": "|".join(PHONE_SCOPES[scope])}
+    files, skipped, finished = [], [], False
+    for line in _ps_lines(script, env, cancelled):
+        kind, _, rest = line.partition("\t")
+        if kind == "F":
+            parts = rest.split("\t", 2)
+            if len(parts) == 3 and parts[0].isdigit():
+                files.append((int(parts[0]), max(0, int(parts[1])) if parts[1].lstrip("-").isdigit() else 0,
+                              parts[2]))
+        elif kind == "D":
+            progress("listing", len(files), rest)
+        elif kind == "S":
+            skipped.append(rest)
+        elif kind == "END":
+            finished = True
+        elif kind == "E":
+            raise RuntimeError(PHONE_GONE)
+    if skipped:
+        engine.log_event("usb", "warn", "Phone folders couldn't be read", f"{device} · " + ", ".join(skipped[:20]))
+    if not finished and not cancelled():
+        # The listing died part way (phone locked, cable, or Windows' phone link gave up): don't pass off a partial
+        # list as the whole phone.
+        raise RuntimeError("The phone stopped answering part way through, so the list would be incomplete. "
+                           "Unlock it, keep the screen on and try again.")
+    return files
+
+
+def mtp_large_files(device, scope, min_mb, hidden=False, app_folders=False, progress=lambda *a: None,
+                    cancelled=lambda: False, limit=1000):
+    files = mtp_list_files(device, scope, min_mb * 1024, hidden, app_folders, progress, cancelled)
+    files.sort(key=lambda f: -f[0])
+    engine.log_event("usb", "info", "Phone large files listed", f"{device} · {scope} · over {min_mb} MB · "
+                                                                f"{len(files)} files")
+    return files[:limit]
+
+
+def mtp_duplicates(device, scope, min_kb, hidden=False, app_folders=False, progress=lambda *a: None,
+                   cancelled=lambda: False):
+    """Identical files by content. Only files with an equal size can match; those are copied to a temporary folder
+    on this PC a few at a time, fingerprinted and deleted straight away. Same result shape as phone_duplicates."""
+    files = mtp_list_files(device, scope, min_kb, hidden, app_folders, progress, cancelled)
+    by_size = {}
+    for size, mtime, path in files:
+        by_size.setdefault(size, []).append((mtime, path))
+    candidates = [(size, mtime, path) for size, group in by_size.items() if len(group) > 1 for mtime, path in group]
+    by_hash = {}
+    for start in range(0, len(candidates), 20):
+        if cancelled():
+            break
+        batch = candidates[start:start + 20]
+        progress("copying", start, len(candidates))
+        meta = {path: (size, mtime) for size, mtime, path in batch}
+        staging = tempfile.mkdtemp(prefix="pcguard-dups-")
+        try:
+            for local, path in copy_from_phone(device, [p for _s, _m, p in batch], staging).items():
+                size, mtime = meta[path]
+                if os.path.getsize(local) != size:
+                    continue  # incomplete copy: never call it a duplicate
+                h = hashlib.sha256()
+                with open(local, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                by_hash.setdefault((h.hexdigest(), size), []).append((mtime, path))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)  # our own temporary copies
+    groups = [(size, sorted(paths)) for (_h, size), paths in by_hash.items() if len(paths) > 1]
+    groups.sort(key=lambda g: -g[0] * (len(g[1]) - 1))
+    wasted = sum(size * (len(p) - 1) for size, p in groups)
+    engine.log_event("usb", "info", "Phone duplicates found", f"{device} · {scope} · {len(groups)} sets · "
+                                                              f"{wasted:,} bytes extra")
+    return groups
+
+
+def mtp_move_to_pc(device, items, dest_root):
+    """Copy phone files [(path, size)] to dest_root keeping their folders, check each copy is complete, then delete
+    those from the phone. Returns {phone path: local path} for the files moved."""
+    staging = tempfile.mkdtemp(prefix=".kavacham-moving-", dir=_mkdirs(dest_root))  # same drive: moving in is instant
+    sizes = dict(items)
+    copied = {}
+    try:
+        for local, path in copy_from_phone(device, [p for p, _s in items], staging).items():
+            if os.path.getsize(local) != sizes[path]:
+                continue  # incomplete: leave the phone's file alone
+            rel = path.split("/", 1)[1] if "/" in path else os.path.basename(path)  # drop the storage name
+            target = os.path.join(dest_root, *rel.split("/"))
+            _mkdirs(os.path.dirname(target))
+            if os.path.exists(target):
+                stem, ext = os.path.splitext(target)
+                target = f"{stem} (from phone){ext}"
+            os.replace(local, target)
+            copied[path] = target
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)  # our own temporary folder
+    gone = delete_many_from_phone(device, list(copied))
+    return {p: local for p, local in copied.items() if p in gone}
+
+
+def _mkdirs(path):
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+# ---------------------------------------------------------------- phone junk: caches, thumbnails, leftovers
+# Looks inside the phone's hidden and app folders (Android/data, Android/obb). Apps' fully private storage
+# (/data/data) can't be opened without rooting the phone, but with USB debugging Android itself can be asked to empty
+# every app's private cache (SYSTEM_CACHE).
+
+SYSTEM_CACHE = "All apps' private cache (emptied by Android itself)"
+JUNK_KINDS = [  # (name, selected by default)
+    ("Leftovers from uninstalled apps", True),
+    ("App cache", True),
+    ("Private app cache", True),
+    ("Thumbnails", True),
+    ("Log and temp files", True),
+    ("App installer files (.apk)", False),
+]
+_JUNK_PATTERNS = [  # (kind, regex): the first group is the item that gets deleted
+    ("App cache", re.compile(r"^(.*?/Android/data/[^/]+/cache)/", re.I)),
+    ("Thumbnails", re.compile(r"^(.*?/\.thumbnails)/", re.I)),
+    ("App installer files (.apk)", re.compile(r"^((?!.*/Android/(?:data|obb)/).*\.(?:apk|apks|xapk))$", re.I)),
+    ("Log and temp files", re.compile(r"^((?!.*/Android/(?:data|obb)/).*\.(?:log|tmp|temp))$", re.I)),
+]
+_APP_FOLDER = re.compile(r"^(.*?/Android/(?:data|obb)/([^/]+))/", re.I)
+
+
+def is_junk_path(path):
+    """Only these may be bulk-deleted from the junk list: never a whole storage or a normal folder."""
+    if path == SYSTEM_CACHE:
+        return True
+    p = path.rstrip("/")
+    return bool(re.search(r"/Android/(?:data|obb)/[^/]+(/cache)?$|/\.thumbnails$|\.(apk|apks|xapk|log|tmp|temp)$",
+                          p, re.I))
+
+
+def _classify_junk(files, installed=None):
+    """files [(size, mtime, path)] -> {kind: {item path: size}}. installed: package names, when known, to spot
+    folders left behind by apps that are gone."""
+    found = {}
+    for size, _mtime, path in files:
+        m = _APP_FOLDER.match(path)
+        if installed is not None and m and m.group(2) not in installed and not m.group(2).startswith("."):
+            kind, item = "Leftovers from uninstalled apps", m.group(1)
+        else:
+            for kind, rx in _JUNK_PATTERNS:
+                m = rx.match(path)
+                if m:
+                    item = m.group(1)
+                    break
+            else:
+                continue
+        found.setdefault(kind, {})
+        found[kind][item] = found[kind].get(item, 0) + size
+    return found
+
+
+def _junk_result(found):
+    """[(kind, selected by default, [(size, path)])], biggest items first, in JUNK_KINDS order."""
+    out = []
+    for kind, default in JUNK_KINDS:
+        items = sorted(((s, p) for p, s in found.get(kind, {}).items()), key=lambda i: -i[0])
+        if items:
+            out.append((kind, default, items))
+    total = sum(s for _k, _d, items in out for s, _p in items)
+    engine.log_event("usb", "info", "Phone junk found", f"{sum(len(i) for _k, _d, i in out)} items · {total:,} bytes")
+    return out
+
+
+def phone_junk(serial, progress=lambda *a: None, cancelled=lambda: False):
+    """Junk over USB debugging, including leftovers of removed apps and every app's private cache."""
+    progress("listing", 0, 0)
+    files = list_phone_files(serial, "Whole phone", 1, hidden=True, app_folders=True)
+    installed = set(re.findall(r"package:(\S+)", adb("shell", "pm", "list", "packages", serial=serial, timeout=120)))
+    found = _classify_junk(files, installed if installed else None)
+    m = re.search(r"App Cache Size:\s*(\d+)", adb("shell", "dumpsys", "diskstats", serial=serial, timeout=60))
+    found.setdefault("Private app cache", {})[SYSTEM_CACHE] = int(m.group(1)) if m else 0
+    return _junk_result(found)
+
+
+def mtp_junk(device, progress=lambda *a: None, cancelled=lambda: False):
+    """Junk over the plain file connection. Leftovers of removed apps need USB debugging (the app list)."""
+    files = mtp_list_files(device, "Whole phone", 1, True, True, progress, cancelled)
+    return _junk_result(_classify_junk(files))
+
+
+def clean_junk_adb(serial, path):
+    """Delete one junk item (a folder or a file) over USB debugging."""
+    if not is_junk_path(path):
+        return False
+    if path == SYSTEM_CACHE:
+        adb("shell", "pm", "trim-caches", "999G", serial=serial, timeout=300)
+        engine.log_event("usb", "ok", "Phone: all apps' private cache emptied", serial)
+        return True
+    out = adb("shell", f"rm -rf {_sh_quote(path)}; [ -e {_sh_quote(path)} ] || echo deleted", serial=serial,
+              timeout=300)
+    ok = "deleted" in out
+    engine.log_event("usb", "ok" if ok else "warn", f"{'Cleaned' if ok else 'Could not clean'} on phone: "
+                                                     f"{os.path.basename(path)}", path)
+    return ok
+
+
+def clean_junk_mtp(device, paths):
+    return delete_many_from_phone(device, [p for p in paths if is_junk_path(p) and p != SYSTEM_CACHE])
