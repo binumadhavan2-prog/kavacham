@@ -2463,7 +2463,7 @@ class App(tk.Tk):
         p = self.page("USB & phone", "Pendrives, USB disks and Android phones connected with a USB cable. They get "
                                      "the same protection as this PC: engine, Defender and quarantine.")
         self.usb_results, self.usb_busy, self._usb_cancel, self._usb_info = [], False, False, {}
-        devices = Card(p, padding=18)
+        devices = self.usb_devices = Card(p, padding=18)
         devices.pack(fill="x")
         head = frame(devices)
         head.pack(fill="x")
@@ -2522,6 +2522,17 @@ class App(tk.Tk):
         for f in self.usb_frames.values():
             f.pack_forget()
         self.usb_frames[key].pack(fill="both", expand=True)
+        self._usb_tab = key
+        self._usb_devices_shown()
+
+    def _usb_devices_shown(self):
+        """Phone storage needs the room for its list and preview, so the devices card steps aside there once a phone
+        is ready to pick (it comes back when none is, to show what's needed)."""
+        show = getattr(self, "_usb_tab", "security") != "storage" or not self._ps_phones
+        if show and not self.usb_devices.winfo_manager():
+            self.usb_devices.pack(fill="x", before=self.usb_tabs)
+        elif not show:
+            self.usb_devices.pack_forget()
 
     # ---- phone storage: large files and duplicates
     def _build_phone_storage(self, parent):
@@ -2532,7 +2543,7 @@ class App(tk.Tk):
         opts.pack(fill="x")
         row1 = frame(opts)
         row1.pack(fill="x")
-        self.ps_vars = {"phone": tk.StringVar(), "scope": tk.StringVar(value=cfg["scope"]),
+        self.ps_vars = {"phone": tk.StringVar(value="Looking for phones…"), "scope": tk.StringVar(value=cfg["scope"]),
                         "large": tk.StringVar(value=cfg["large"]), "dup": tk.StringVar(value=cfg["dup"]),
                         "hidden": tk.BooleanVar(value=cfg["hidden"]), "app_folders": tk.BooleanVar(value=cfg["app_folders"])}
         for text, key, values, width in (("Phone", "phone", [], 22), ("Look in", "scope", list(usb.PHONE_SCOPES), 18),
@@ -2560,28 +2571,29 @@ class App(tk.Tk):
                                   height=32)]
         for b in self.ps_buttons:
             b.pack(side="right", padx=(px(8), 0))
-        label(opts, "Works over the normal USB cable: unlock the phone and choose \"File transfer\". To find "
-                    "duplicates, files of the same size are copied to a temporary folder on this PC to compare, then "
-                    "deleted (with USB debugging on, they're compared on the phone). Nothing leaves this PC. 'Find "
-                    "junk' always looks in hidden and private app folders (Android/data); with USB debugging it also "
-                    f"finds leftovers of removed apps and can empty every app's private cache. Deleted files go to "
-                    f"the phone's Kavacham bin first: restore them from 'Phone bin' for {phonecare.KEEP_DAYS} days. "
-                    "Chat databases and backups are never deleted.", "small", SUBTLE,
+        label(opts, f"Deleted files go to the phone's Kavacham bin first: restore them from 'Phone bin' for "
+                    f"{phonecare.KEEP_DAYS} days. Chat databases and backups are never deleted. Files are only "
+                    "compared and previewed on this PC; nothing leaves it.", "small", SUBTLE,
               wraplength=px(860), justify="left").pack(anchor="w", pady=(px(12), 0))
         self.ps_bar = Bar(parent, height=4)
 
+        acts = frame(parent)
+        acts.pack(side="bottom", fill="x", pady=(px(10), 0))
+        self.ps_status = label(parent, "", "small", MUTED, wraplength=px(860), justify="left")
+        self.ps_status.pack(side="bottom", anchor="w", pady=(px(10), 0))
         box = Card(parent, padding=8)
         box.pack(fill="both", expand=True, pady=(px(14), 0))
-        self.ps_tree = table(box, [("size", "SIZE", 120, False), ("modified", "MODIFIED", 150, False)],
-                             tree_column=("FILE ON THE PHONE", 560))
+        self._build_ps_preview(box)
+        self.ps_tree = table(box, [("size", "SIZE", 95, False), ("modified", "MODIFIED", 135, False)],
+                             tree_column=("FILE ON THE PHONE", 300))
         self.ps_tree.configure(selectmode="extended")
         self.ps_tree.tag_configure("group", font=F["body_b"], background=SURFACE_2)
         self.ps_tree.tag_configure("protected", foreground=SUBTLE)
         self.ps_tree.bind("<<TreeviewSelect>>", lambda _e: self._ps_selection_changed())
+        self.ps_tree.bind("<Double-1>", lambda _e: self._ps_selected() and self.ps_open())
+        self._ps_show_preview()
         set_empty(self.ps_tree, "Plug in your phone, unlock it and choose \"File transfer\", then find large files "
                                 "or duplicates.")
-        acts = frame(parent)
-        acts.pack(fill="x", pady=(px(14), 0))
         self.ps_delete_btn = Button(acts, "Delete from phone", self.ps_delete, "danger", icon="clean")
         self.ps_delete_btn.pack(side="right")
         self.ps_restore_btn = Button(acts, "Restore", self.ps_restore, "primary", icon="undo")
@@ -2591,16 +2603,15 @@ class App(tk.Tk):
         self.ps_select_btn.pack(side="right")
         Button(acts, "Open", self.ps_open, "ghost", icon="open").pack(side="right", padx=(0, px(10)))
         self.ps_bin = {}  # tree row -> bin item, in 'Phone bin' view
-        self.ps_status = label(acts, "", "small", MUTED, wraplength=px(380), justify="left")
-        self.ps_status.pack(side="left")
 
     def _save_ps_settings(self):
         for k in ("scope", "large", "dup", "hidden", "app_folders"):
             self.settings["usb"]["storage"][k] = self.ps_vars[k].get()
         write_json(SETTINGS_FILE, self.settings)
 
-    def _ps_set_phones(self, ready, mtp):
-        """Phones to choose from: USB debugging ones first (faster duplicates), then plain File transfer ones."""
+    def _ps_set_phones(self, ready, mtp, locked=()):
+        """Phones to choose from: USB debugging ones first (faster duplicates), then plain File transfer ones, then
+        ones whose files are hidden (locked): picking one of those says to unlock it."""
         self._ps_phones = {}
         for d in ready:
             info = self._usb_info.get(d["serial"], {})
@@ -2609,9 +2620,12 @@ class App(tk.Tk):
             self._ps_phones[f"{name} ({how})"] = ("adb", d["serial"])
         for name in mtp:
             self._ps_phones[name] = ("mtp", name)
+        for name in locked:
+            self._ps_phones[f"{name} · locked"] = ("mtp", name)
         self.ps_phone_box.configure(values=list(self._ps_phones))
         if self.ps_vars["phone"].get() not in self._ps_phones:
-            self.ps_vars["phone"].set(next(iter(self._ps_phones), ""))
+            self.ps_vars["phone"].set(next(iter(self._ps_phones), "No phone found"))
+        self._usb_devices_shown()
 
     def _ps_phone(self):
         """("adb", serial) or ("mtp", device name) for the chosen phone."""
@@ -2639,6 +2653,8 @@ class App(tk.Tk):
         self.ps_tree.delete(*self.ps_tree.get_children())
         self.ps_meta.clear()
         self.ps_bin.clear()
+        self._ps_thumbs.clear()
+        self._ps_show_preview()
         self._ps_mode_buttons(mode)
         set_empty(self.ps_tree, "Opening the phone's Kavacham bin…" if mode == "bin" else "Searching the phone…")
         v = {k: self.ps_vars[k].get() for k in self.ps_vars}
@@ -2763,6 +2779,108 @@ class App(tk.Tk):
         sel = self._ps_selected()
         if sel:
             self.ps_status.configure(text=f"{len(sel)} selected · {human(sum(s for _i, s, _p in sel))}")
+        if self._ps_preview_job:
+            self.after_cancel(self._ps_preview_job)
+        self._ps_preview_for = self._ps_preview_iid = None  # until the panel catches up
+        self._ps_preview_job = self.after(300, self._ps_show_preview)  # not on every arrow-key step
+
+    def _build_ps_preview(self, parent):
+        """Right-hand panel: the picture, where the file is, and for duplicates where every copy is."""
+        side = frame(parent, width=px(270))
+        side.pack(side="right", fill="y", padx=(px(12), px(4)))
+        side.pack_propagate(False)
+        pic = tk.Frame(side, bg=SURFACE_2, width=px(260), height=px(130))
+        pic.pack(pady=(px(4), px(10)))
+        pic.pack_propagate(False)
+        self.ps_pv_img = tk.Label(pic, bg=SURFACE_2, fg=SUBTLE, font=F["small"])
+        self.ps_pv_img.pack(fill="both", expand=True)
+        self.ps_pv_name = label(side, "", "body_b", wraplength=px(260), justify="left")
+        self.ps_pv_name.pack(anchor="w")
+        self.ps_pv_info = label(side, "", "small", MUTED, wraplength=px(260), justify="left")
+        self.ps_pv_info.pack(anchor="w", pady=(px(4), 0))
+        self._ps_thumbs = {}  # phone path -> PhotoImage, or None when there's no picture to show
+        self._ps_preview_job = None
+        self._ps_preview_for = self._ps_preview_iid = None
+
+    def _ps_preview_target(self):
+        """(row, size, phone path, [paths of all copies]) for the row to show, or None."""
+        sel = self.ps_tree.selection()
+        if len(sel) != 1:
+            return None
+        iid = sel[0]
+        if iid not in self.ps_meta:  # a group heading: show its first file, and every copy for duplicates
+            kids = [k for k in self.ps_tree.get_children(iid) if k in self.ps_meta]
+            if not kids:
+                return None
+            copies = [self.ps_meta[k][1] for k in kids] if self.ps_mode == "dups" else []
+            return (kids[0], *self.ps_meta[kids[0]], copies)
+        parent = self.ps_tree.parent(iid)
+        copies = [self.ps_meta[k][1] for k in self.ps_tree.get_children(parent) if k in self.ps_meta] \
+            if parent and self.ps_mode == "dups" else []
+        return (iid, *self.ps_meta[iid], copies)
+
+    def _ps_show_preview(self):
+        self._ps_preview_job = None
+        target = self._ps_preview_target()
+        self.ps_pv_img.configure(image="", text="")
+        self.ps_pv_img.image = None
+        if not target:
+            n = len(self._ps_selected())
+            self.ps_pv_name.configure(text="Preview" if not n else f"{n} files selected")
+            self.ps_pv_info.configure(text="Click a file to see it here. Double-click to open it." if not n else
+                                      f"{human(sum(s for _i, s, _p in self._ps_selected()))} in total")
+            self._ps_preview_for = None
+            return
+        iid, size, path, copies = target
+        shown = self.ps_bin[iid]["original"] if iid in self.ps_bin else path
+        name = shown.rsplit("/", 1)[-1]
+
+        def where(p):  # "DCIM/Camera", or "SanDisk SD card: DCIM/Camera" for anything but internal storage
+            root, _, rel = p.rpartition("/")[0].partition("/")
+            return (rel or root) if root.startswith("Internal") else f"{root}: {rel}".rstrip(": ")
+        if len(copies) > 1:
+            info = [f"The same file is in {len(copies)} places:"]
+            info += [f"• {where(c)}" + ("  (kept safe)" if phonecare.is_protected(c) else "") for c in copies[:4]]
+            if len(copies) > 4:
+                info.append(f"  and {len(copies) - 4} more")
+        else:
+            info = [f"In {where(shown)}", " · ".join(x for x in (human(size) if size else "",
+                                                                   self.ps_tree.set(iid, "modified")) if x)]
+        self.ps_pv_name.configure(text=name)
+        self.ps_pv_info.configure(text="\n".join(i for i in info if i))
+        self._ps_preview_for, self._ps_preview_iid = path, iid
+        if os.path.splitext(path)[1].lower() not in phonecare.PICTURES:
+            self.ps_pv_img.configure(text="No picture preview for this kind of file.\nUse Open to look at it.")
+            return
+        if path in self._ps_thumbs:
+            self._ps_put_thumb(path, self._ps_thumbs[path])
+            return
+        if self.ps_busy:
+            self.ps_pv_img.configure(text="The picture shows once the\ncurrent job has finished.")
+            return
+        if size > phonecare.THUMB_LIMIT:
+            self.ps_pv_img.configure(text="Too big to preview here.\nUse Open to look at it.")
+            return
+        phone = self._ps_phone()
+        if not phone:
+            return
+        self.ps_pv_img.configure(text="Loading the picture from the phone…")
+
+        def work():
+            img = phonecare.thumbnail(phone, path, size, (px(260), px(130)))
+            self.ui(self._ps_put_thumb, path, img, True)
+        self.bg(work)
+
+    def _ps_put_thumb(self, path, img, fresh=False):
+        if fresh:
+            img = self._ps_thumbs[path] = ImageTk.PhotoImage(img) if img else None
+        if self._ps_preview_for != path:
+            return  # the user has moved on to another file
+        if img:
+            self.ps_pv_img.configure(image=img, text="")
+            self.ps_pv_img.image = img
+        else:
+            self.ps_pv_img.configure(text="Couldn't load the picture.\nUnlock the phone, or use Open.")
 
     def ps_select_extra(self):
         if self.ps_mode == "junk":
@@ -2931,7 +3049,8 @@ class App(tk.Tk):
 
     def ps_open(self):
         """Look at a file before deciding: it's copied to a temporary folder on this PC and opened there."""
-        rows = self._ps_need_selection()
+        shown = self._ps_preview_iid if self._ps_preview_iid in self.ps_meta else None
+        rows = (not self._ps_selected() and shown and [(shown, *self.ps_meta[shown])]) or self._ps_need_selection()
         phone = rows and self._ps_phone()
         if not phone:
             return
@@ -3023,7 +3142,7 @@ class App(tk.Tk):
         adb_devs = status["adb"]
         ready = [d for d in adb_devs if d["state"] == "device"]
         waiting = [d for d in adb_devs if d["state"] != "device"]
-        self._ps_set_phones(ready, status["files"])
+        self._ps_set_phones(ready, status["files"], status["hidden"])
         for d in adb_devs:
             info = self._usb_info.get(d["serial"], {})
             if d["state"] == "device":
@@ -3061,11 +3180,8 @@ class App(tk.Tk):
             n += 1
         if (status["files"] or status["hidden"]) and not ready and not waiting and not status["driver"]:
             row("bolt", "Make phone scans much faster: turn on USB debugging",
-                "File transfer reads one file at a time and phones often drop it during long scans. With USB debugging "
-                "the phone searches itself, stays awake while Kavacham works, and installed apps can be checked. "
-                "Once: Settings → About phone → tap Build number (on Xiaomi: MIUI version) 7 times → Developer "
-                "options (in System, or Additional settings on Xiaomi) → USB debugging on. Then plug the cable in "
-                "again and tap Allow on the phone.",
+                "File transfer is slow and phones often drop it during long scans. With USB debugging the phone "
+                "searches itself and stays awake. 'Set up' shows the steps.",
                 [("Set up", self.usb_setup_adb, "secondary"), ("Use Wi-Fi", self.usb_wifi_dialog, "ghost")], n == 0)
             n += 1
         if not n:

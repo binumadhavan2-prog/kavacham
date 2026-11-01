@@ -65,6 +65,8 @@ def connection_status(check_files=True):
         data = json.loads(usb._ps(_PS_STATUS, env={**os.environ, "PCG_FILES": "1" if check_files else "0"},
                                   timeout=45) or "{}") or {}
     except Exception:
+        if check_files:  # a phone busy with another job can be too slow to answer: just list what's plugged in
+            return connection_status(check_files=False)
         data = {}
     phones = data.get("phones") or []
     phones = [phones] if isinstance(phones, dict) else phones
@@ -296,6 +298,8 @@ def empty(phone, items):
     if kind == "adb":
         gone_targets = {t for t in targets if _adb_rm(ident, t)}
     else:
+        # Deleting a whole folder fails or hangs the link on some phones (a Redmi), so go file by file
+        targets, covered = sorted(i["path"] for i in items), {}
         gone_targets = usb.delete_many_from_phone(ident, targets)
     gone = set()
     for t in gone_targets:
@@ -318,7 +322,7 @@ def _stamp_dir(path):
 
 
 def _tidy(phone, items):
-    """After a restore: remove stamp folders that are now empty."""
+    """After a restore or delete: remove stamp folders that are now empty (over USB debugging only)."""
     kind, ident = phone
     if kind == "adb":
         roots = {_IN_BIN.match(i["path"]).group(1) for i in items if _IN_BIN.match(i["path"])}
@@ -326,10 +330,8 @@ def _tidy(phone, items):
             usb.adb("shell", f"find {usb._sh_quote(r + '/' + BIN)} -mindepth 1 -type d -empty -delete 2>/dev/null",
                     serial=ident, timeout=60)
         return
-    left = {_stamp_dir(i["path"]) for i in bin_items(phone)}
-    empty_dirs = {_stamp_dir(i["path"]) for i in items} - left
-    if empty_dirs:
-        usb.delete_many_from_phone(ident, sorted(empty_dirs))
+    # Over File transfer, empty folders stay: they take no space, are hidden, and deleting a folder can hang the
+    # phone's link (seen on a Redmi).
 
 
 # over USB debugging
@@ -397,6 +399,7 @@ function Ensure-Folder($path) {
 def _mtp_moves(device, jobs, keep_existing=False):
     if not jobs:
         return set()
+    usb.phone_storages(device)  # a locked phone hides its files: say so rather than move nothing
     listing = os.path.join(tempfile.gettempdir(), f"kavacham-bin-{os.getpid()}.json")
     with open(listing, "w", encoding="utf-8") as f:
         json.dump([{"src": s, "dst": d, "alt": _alt_name(d)} for s, d in jobs], f)
@@ -413,10 +416,27 @@ foreach ($j in (Get-Content -Raw -Encoding UTF8 $env:PCG_LIST | ConvertFrom-Json
   $dest = Ensure-Folder (($parts[0..($parts.Count - 2)]) -join '/')
   if (-not $dest) { continue }
   $name = $parts[-1]
-  $newName = if ($name -ne (Real-Name $it)) { $name } else { $null }
-  if ($fileop) { try { [PcgFileOp]::Move($it, $dest, $newName) } catch {} }
-  else { $dest.GetFolder.MoveHere($it, 0x614); Start-Sleep -Milliseconds 500 }
-  if (-not (Find-Item $j.src) -and (Find-Item $target)) { [void]$done.Add($j.src) }
+  $src = $j.src
+  if ($name -ne (Real-Name $it)) {
+    # rename where it is first, so the move never meets a file of the same name. Setting Name follows Explorer's
+    # "hide extensions" too: when it's hidden, Windows adds the extension back itself.
+    $srcParts = $src -split '/'
+    $renamed = ($srcParts[0..($srcParts.Count - 2)] + $name) -join '/'
+    if (Find-Item $renamed) { continue }
+    $it.Name = if ($it.Name -ne (Real-Name $it)) { [IO.Path]::GetFileNameWithoutExtension($name) } else { $name }
+    for ($i = 0; $i -lt 20 -and -not (Find-Item $renamed); $i++) { Start-Sleep -Milliseconds 250 }
+    $it = Find-Item $renamed
+    if (-not $it) { continue }
+    $src = $renamed
+  }
+  # IFileOperation quietly aborts phone-to-phone moves (seen on a Redmi), so use the Explorer-style move and wait
+  # until it has finished: the copy shows up first, the original goes after.
+  $dest.GetFolder.MoveHere($it, 0x614)
+  for ($i = 0; $i -lt 240; $i++) {
+    if ((Find-Item $target) -and -not (Find-Item $src)) { break }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not (Find-Item $src) -and (Find-Item $target)) { [void]$done.Add($j.src) }
 }
 ConvertTo-Json -Compress -InputObject @($done)
 """
@@ -430,6 +450,7 @@ ConvertTo-Json -Compress -InputObject @($done)
 
 
 def _mtp_bin_files(device):
+    usb.phone_storages(device)  # else a locked phone would look like an empty bin
     script = usb._PS_FIND + r"""
 function Walk($folder, $p) {
   foreach ($it in $folder.GetFolder.Items()) {
@@ -470,3 +491,33 @@ def preview(phone, path):
         return local if os.path.exists(local) else None
     mapping = usb.copy_from_phone(ident, [path], PREVIEW_DIR)
     return next(iter(mapping), None)
+
+
+PICTURES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+THUMB_LIMIT = 40 * 1024 * 1024  # bigger "pictures" aren't worth copying just for a preview
+
+
+def thumbnail(phone, path, size, box):
+    """A PIL image of a phone picture fitting box (width, height), or None for other files. The copy it's made from
+    is deleted at once."""
+    if os.path.splitext(path)[1].lower() not in PICTURES or not 0 < size <= THUMB_LIMIT:
+        return None
+    from PIL import Image, ImageOps
+    kind, ident = phone
+    folder = tempfile.mkdtemp(prefix="kavacham-thumb-")
+    try:
+        if kind == "adb":
+            local = os.path.join(folder, os.path.basename(path))
+            usb.adb("pull", path, local, serial=ident, timeout=120)
+        else:
+            local = next(iter(usb.copy_from_phone(ident, [path], folder)), None)
+        if not local or not os.path.exists(local):
+            return None
+        with Image.open(local) as im:
+            im = ImageOps.exif_transpose(im)  # phone photos are often stored sideways with a "rotate" note
+            im.thumbnail(box)
+            return im.convert("RGB")
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)  # our own temporary copy

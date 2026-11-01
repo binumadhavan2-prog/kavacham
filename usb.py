@@ -40,6 +40,8 @@ PHONE_SKIP = ["whatsapp images", "whatsapp video", "whatsapp audio", "whatsapp v
               "whatsapp business video", "whatsapp business audio", "whatsapp business voice notes", ".statuses",
               ".thumbs", ".shared", ".trash", "telegram images", "telegram video", "telegram audio", "databases",
               "backups"]
+# media-only folders the junk search can pass by (WhatsApp Documents stays in: installers shared in chats land there)
+JUNK_SKIP = PHONE_SKIP + ["camera", "screenshots"]
 STORES = {"com.android.vending", "com.sec.android.app.samsungapps", "com.huawei.appmarket", "com.xiaomi.market",
           "com.xiaomi.mipicks", "com.oppo.market", "com.heytap.market", "com.vivo.appstore", "com.amazon.venezia",
           "com.google.android.packageinstaller.store"}
@@ -307,9 +309,6 @@ public static class PcgFileOp {
   public static void Delete(object folderItem) {
     var op = Op(); op.DeleteItem(Item(folderItem), IntPtr.Zero); op.PerformOperations();
   }
-  public static void Move(object folderItem, object destFolderItem, string newName) {
-    var op = Op(); op.MoveItem(Item(folderItem), Item(destFolderItem), newName, IntPtr.Zero); op.PerformOperations();
-  }
   public static void NewFolder(object parentFolderItem, string name) {
     var op = Op(); op.NewItem(Item(parentFolderItem), 0x10, name, null, IntPtr.Zero); op.PerformOperations();
   }
@@ -456,6 +455,7 @@ def delete_many_from_phone(device, paths):
     """Delete files on the phone over the file connection. Returns the set of paths that are gone."""
     if not paths:
         return set()
+    phone_storages(device)  # a locked phone hides its files: say so rather than delete nothing
     listing = os.path.join(tempfile.gettempdir(), f"pcguard-del-{os.getpid()}.json")
     with open(listing, "w", encoding="utf-8") as f:
         json.dump(list(paths), f)
@@ -956,13 +956,16 @@ def move_to_pc(serial, path, dest_root):
 # "Internal shared storage/DCIM/Camera/IMG_1.jpg".
 
 def mtp_list_files(device, scope, min_kb, hidden=False, app_folders=False, progress=lambda *a: None,
-                   cancelled=lambda: False):
-    """Files on the phone of at least min_kb: [(size, mtime, path)]."""
+                   cancelled=lambda: False, junk=False):
+    """Files on the phone of at least min_kb: [(size, mtime, path)]. junk: skip folders junk can't be in (photo and
+    chat media, app data other than caches), which over File transfer turns tens of minutes into a few."""
     phone_storages(device)
     script = _PS_FIND + r"""
 $min = [int64]$env:PCG_MIN
 $hidden = $env:PCG_HIDDEN -eq '1'
 $appf = $env:PCG_APPF -eq '1'
+$junk = $env:PCG_JUNK -eq '1'
+$skipdirs = $env:PCG_SKIPDIRS -split '\|'
 function Walk($folder, $p) {
   "D`t$p"
   $items = $null
@@ -977,6 +980,10 @@ function Walk($folder, $p) {
       if ($name -eq '.KavachamBin') { continue }  # files already deleted with Kavacham, see phone.py
       $q = "$p/$name"
       if (-not $appf -and $q -match '^[^/]+/Android/(data|obb)$') { continue }
+      if ($junk) {  # only where junk can be: an app's private folder matters just for its cache
+        if ($skipdirs -contains $name.ToLower() -or $q -match '/Android/obb$') { continue }
+        if ($q -match '/Android/data/[^/]+/[^/]+$' -and $name -ne 'cache') { continue }
+      }
       Walk $it $q
     } else {
       $size = [int64]$it.Size
@@ -1002,7 +1009,8 @@ foreach ($s in @($dev.GetFolder.Items() | ? { $_.IsFolder })) {
 """
     env = {**os.environ, "PCG_DEVICE": device, "PCG_MIN": str(max(1, int(min_kb)) * 1024),
            "PCG_HIDDEN": "1" if hidden else "0", "PCG_APPF": "1" if app_folders else "0",
-           "PCG_ROOTS": "|".join(PHONE_SCOPES[scope])}
+           "PCG_ROOTS": "|".join(PHONE_SCOPES[scope]), "PCG_JUNK": "1" if junk else "0",
+           "PCG_SKIPDIRS": "|".join(JUNK_SKIP)}
     files, skipped, finished = [], [], False
     for line in _ps_lines(script, env, cancelled):
         kind, _, rest = line.partition("\t")
@@ -1021,6 +1029,11 @@ foreach ($s in @($dev.GetFolder.Items() | ? { $_.IsFolder })) {
             raise RuntimeError(PHONE_GONE)
     if skipped:
         engine.log_event("usb", "warn", "Phone folders couldn't be read", f"{device} · " + ", ".join(skipped[:20]))
+    if finished and not cancelled():
+        try:
+            phone_storages(device)
+        except RuntimeError:
+            finished = False  # it locked part way: folders read after that came back empty, not missing
     if not finished and not cancelled():
         # The listing died part way (phone locked, cable, or Windows' phone link gave up): don't pass off a partial
         # list as the whole phone.
@@ -1182,7 +1195,7 @@ def phone_junk(serial, progress=lambda *a: None, cancelled=lambda: False):
 
 def mtp_junk(device, progress=lambda *a: None, cancelled=lambda: False):
     """Junk over the plain file connection. Leftovers of removed apps need USB debugging (the app list)."""
-    files = mtp_list_files(device, "Whole phone", 1, True, True, progress, cancelled)
+    files = mtp_list_files(device, "Whole phone", 1, True, True, progress, cancelled, junk=True)
     return _junk_result(_classify_junk(files))
 
 
